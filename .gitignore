@@ -1,0 +1,37 @@
+# Build outputs
+cmake-build-*/
+build/
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.obj
+*.d
+*.lst
+
+# IDE and local metadata
+.idea/
+.vscode/
+.settings/
+.agents/
+.codex/
+
+# Runtime/debug captures
+*.csv
+*.log
+vofa+.cmds.json
+vofa+.tabviews.json
+
+# Presentation/report scratch outputs
+PPT_Current_Progress_Report/
+PPT_Integration_Review/
+PPT_Report/
+*.pptx
+*.pdf
+
+# OS files
+Thumbs.db
+Desktop.ini
