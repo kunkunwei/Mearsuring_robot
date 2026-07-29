@@ -53,6 +53,7 @@ osThreadId StartCanTaskHandle;
 osThreadId StartObserveTasHandle;
 osThreadId StartRosTaskHandle;
 osThreadId StartChassisTasHandle;
+osThreadId StartUltrasonicHandle;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -65,6 +66,7 @@ void Can_Task(void const * argument);
 void ObserveTask(void const * argument);
 void Ros_Task(void const * argument);
 void Chassis_Task(void const * argument);
+void Ultrasonic_Task(void const * argument);
 
 extern void MX_USB_DEVICE_Init(void);
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -135,6 +137,10 @@ void MX_FREERTOS_Init(void) {
   /* definition and creation of StartChassisTas */
   osThreadDef(StartChassisTas, Chassis_Task, osPriorityIdle, 0, 512);
   StartChassisTasHandle = osThreadCreate(osThread(StartChassisTas), NULL);
+
+  /* definition and creation of StartUltrasonic */
+  osThreadDef(StartUltrasonic, Ultrasonic_Task, osPriorityHigh, 0, 256);
+  StartUltrasonicHandle = osThreadCreate(osThread(StartUltrasonic), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -250,6 +256,24 @@ __weak void Chassis_Task(void const * argument)
     osDelay(1);
   }
   /* USER CODE END Chassis_Task */
+}
+
+/* USER CODE BEGIN Header_Ultrasonic_Task */
+/**
+* @brief Function implementing the StartUltrasonic thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_Ultrasonic_Task */
+__weak void Ultrasonic_Task(void const * argument)
+{
+  /* USER CODE BEGIN Ultrasonic_Task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END Ultrasonic_Task */
 }
 
 /* Private application code --------------------------------------------------*/

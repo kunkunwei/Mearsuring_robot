@@ -18,7 +18,6 @@
 
 #include "usart.h"
 #include "minipc.h"
-#include "vofa.h"
 #ifdef USE_SBUS_PROTOCOL
 #include "sbus_remote.h"
 #else
@@ -29,7 +28,7 @@
 
 /* DMA双缓冲 */
 __attribute__ ((section (".AXI_SRAM"))) uint8_t Mode_Buf[2][1];
-__attribute__ ((section (".AXI_SRAM"))) uint8_t USART6_MiniPC_Buf[2][VOFA_RX_CMD_MAX_LEN];
+__attribute__ ((section (".AXI_SRAM"))) uint8_t USART6_MiniPC_Buf[2][MINIPC_UART_RX_BUFFER_SIZE];
 uint8_t Usart_Mode=0;
 /* Private function prototypes -----------------------------------------------*/
 /**
@@ -61,7 +60,7 @@ void BSP_USART_Init(void)
 								  (uint32_t *)&(huart6.Instance->DR),
 								  (uint32_t *)USART6_MiniPC_Buf[0],
 								  (uint32_t *)USART6_MiniPC_Buf[1],
-								  VOFA_RX_CMD_MAX_LEN);
+								  MINIPC_UART_RX_BUFFER_SIZE);
 
 }
 //------------------------------------------------------------------------------
@@ -315,21 +314,14 @@ void USER_USART6_RxHandler(UART_HandleTypeDef *huart, uint16_t Size)
 		huart->hdmarx->Instance->CR &= ~(DMA_SxCR_CT);
 	}
 
-	if (Size > VOFA_RX_CMD_MAX_LEN)
+	if (Size > MINIPC_UART_RX_BUFFER_SIZE)
 	{
-		Size = VOFA_RX_CMD_MAX_LEN;
+		Size = MINIPC_UART_RX_BUFFER_SIZE;
 	}
 
-	if (!Vofa_TryStorePidCommand(rx_buf, Size))
-	{
-		// MiniPC UART command parsing is disabled while tuning PID with VOFA+.
-		// if (Size == MINIPC_CHASSIS_CMD_FRAME_LENGTH)
-		// {
-		// 	(void)MiniPC_UpdateChassisCmdFromBuffer(rx_buf, Size);
-		// }
-	}
+	(void)MiniPC_UpdateChassisCmdFromStream(rx_buf, Size);
 
-	__HAL_DMA_SET_COUNTER(huart->hdmarx, VOFA_RX_CMD_MAX_LEN);
+	__HAL_DMA_SET_COUNTER(huart->hdmarx, MINIPC_UART_RX_BUFFER_SIZE);
 }
 /**
   * @brief  Rx Transfer completed callbacks.

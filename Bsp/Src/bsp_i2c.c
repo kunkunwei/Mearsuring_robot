@@ -67,7 +67,7 @@ uint8_t BSP_I2C_ScanBus(I2C_HandleTypeDef *hi2c, uint8_t *addr_buf, uint8_t max_
         return 0U;
     }
 
-    for (uint8_t addr = 0x08U; addr <= 0x77U && found_num < max_addr_num; addr++)
+    for (uint8_t addr = 0x03U; addr <= 0x7FU && found_num < max_addr_num; addr++)
     {
         if (BSP_I2C_IsDeviceReady(hi2c, addr, timeout_ms) == HAL_OK)
         {
@@ -77,6 +77,46 @@ uint8_t BSP_I2C_ScanBus(I2C_HandleTypeDef *hi2c, uint8_t *addr_buf, uint8_t max_
 
     return found_num;
 }
+
+void BSP_I2C_RecoverBus(I2C_HandleTypeDef *hi2c)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    if (hi2c == NULL || hi2c->Instance != I2C2)
+    {
+        return;
+    }
+
+    HAL_I2C_DeInit(hi2c);
+    __HAL_RCC_GPIOF_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
+
+    HAL_GPIO_WritePin(GPIOF, GPIO_PIN_0 | GPIO_PIN_1, GPIO_PIN_SET);
+    Delay_us(10U);
+
+    for (uint8_t i = 0U; i < 9U; i++)
+    {
+        HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_RESET);
+        Delay_us(10U);
+        HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET);
+        Delay_us(10U);
+    }
+
+    HAL_GPIO_WritePin(GPIOF, GPIO_PIN_0, GPIO_PIN_RESET);
+    Delay_us(10U);
+    HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1, GPIO_PIN_SET);
+    Delay_us(10U);
+    HAL_GPIO_WritePin(GPIOF, GPIO_PIN_0, GPIO_PIN_SET);
+    Delay_us(10U);
+
+    MX_I2C2_Init();
+}
+
 /**
   * @brief          通过I2C读取ist8310的一个字节
   * @param[in]      寄存器地址
@@ -92,7 +132,7 @@ uint8_t ist8310_IIC_read_single_reg(uint8_t reg)
         &reg_data,
         1,
         1000);
-    //ist8310_delay_us(IIC_time);
+    // ist8310_delay_us(IIC_time);
     return reg_data;
 }
 /**

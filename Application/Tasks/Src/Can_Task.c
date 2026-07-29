@@ -8,7 +8,7 @@
 #include "can.h"
 #include "Chassis_Task.h"
 #include "User_Task.h"
-#include "mymotor.h" /* 显式引入，不再依�?bsp_can.h 间接引入 */
+#include "mymotor.h" /* 显式引入，不再依�?bsp_can.h 间接引入 */
 #include "vofa.h"
 // #define DEBUG
 
@@ -27,14 +27,14 @@ void Can_Task(void const *argument)
     /* Infinite loop */
     TickType_t systick = 0;
 
-    /* 等待底盘初始化完成后再注册回调，避免访问空指�?*/
+    /* 等待底盘初始化完成后再注册回调，避免访问空指�?*/
     while (!is_chassis_init_done()) osDelay(1);
 
 
-    /* 将电�?CAN 接收回调注册�?BSP �?*/
+    /* 将电�?CAN 接收回调注册�?BSP �?*/
     mymotor_register_can_callbacks();
 
-    // const gimbal_t *local_gimbal = get_gimbal_point(); /* 地址固定，循环外初始化一次即�?*/
+    // const gimbal_t *local_gimbal = get_gimbal_point(); /* 地址固定，循环外初始化一次即�?*/
     const chassis_move_t *local_chassis = get_chassis_control_point();
 
     // save_pos_zero(CAN1_YAW_MOTOR_ID);

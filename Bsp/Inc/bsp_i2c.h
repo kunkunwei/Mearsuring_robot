@@ -17,6 +17,7 @@ HAL_StatusTypeDef BSP_I2C_MasterReceive(I2C_HandleTypeDef *hi2c, uint8_t addr_7b
 HAL_StatusTypeDef BSP_I2C_MemRead(I2C_HandleTypeDef *hi2c, uint8_t addr_7bit, uint8_t reg, uint8_t *data, uint16_t len, uint32_t timeout_ms);
 HAL_StatusTypeDef BSP_I2C_MemWrite(I2C_HandleTypeDef *hi2c, uint8_t addr_7bit, uint8_t reg, const uint8_t *data, uint16_t len, uint32_t timeout_ms);
 uint8_t BSP_I2C_ScanBus(I2C_HandleTypeDef *hi2c, uint8_t *addr_buf, uint8_t max_addr_num, uint32_t timeout_ms);
+void BSP_I2C_RecoverBus(I2C_HandleTypeDef *hi2c);
 
 extern uint8_t ist8310_IIC_read_single_reg(uint8_t reg);
 extern void ist8310_IIC_write_single_reg(uint8_t reg, uint8_t data);

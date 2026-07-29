@@ -10,62 +10,53 @@
 #include "vofa.h"
 #include "i2c.h"
 #include "ultrasonic_i2c.h"
+#include "Ultrasonic_Task.h"
 
 #define CAN_RAW_DEBUG_ENABLE 0
 #define CAN_DEBUG_NO_FRAME_PRINT_MS 500U
-#define ULTRASONIC_SCAN_INTERVAL_MS 1000U
-#define ULTRASONIC_SCAN_ADDR_MAX 8U
+#define ULTRASONIC_DEBUG_PRINT_INTERVAL_MS 200U
 
-static UltrasonicI2C_t ultrasonic_left;
-static UltrasonicI2C_t ultrasonic_right;
-static uint8_t ultrasonic_init_done = 0U;
-static uint8_t ultrasonic_scan_addr[ULTRASONIC_SCAN_ADDR_MAX];
-static uint8_t ultrasonic_scan_count = 0U;
-static uint32_t ultrasonic_last_scan_tick = 0U;
+static uint32_t ultrasonic_last_debug_print_tick = 0U;
 
-static void User_Ultrasonic_Init(void)
+static void User_Ultrasonic_DebugPrint(void)
 {
-    if (ultrasonic_init_done != 0U)
+    uint32_t now_ms = HAL_GetTick();
+    const UltrasonicI2C_t *ultrasonic_left = Ultrasonic_Task_GetLeft();
+    const UltrasonicI2C_t *ultrasonic_right = Ultrasonic_Task_GetRight();
+
+    if (ultrasonic_last_debug_print_tick != 0U &&
+        (uint32_t)(now_ms - ultrasonic_last_debug_print_tick) < ULTRASONIC_DEBUG_PRINT_INTERVAL_MS)
     {
         return;
     }
+    ultrasonic_last_debug_print_tick = now_ms;
 
-    UltrasonicI2C_Init(&ultrasonic_left, &hi2c2, ULTRASONIC_LEFT_ADDR);
-    UltrasonicI2C_Init(&ultrasonic_right, &hi2c2, ULTRASONIC_RIGHT_ADDR);
-    ultrasonic_init_done = 1U;
-}
-
-static void User_Ultrasonic_Update(void)
-{
-    uint32_t now_ms = HAL_GetTick();
-
-    UltrasonicI2C_Update(&ultrasonic_left, now_ms);
-    UltrasonicI2C_Update(&ultrasonic_right, now_ms);
-
-    if (ultrasonic_last_scan_tick == 0U ||
-        (uint32_t)(now_ms - ultrasonic_last_scan_tick) >= ULTRASONIC_SCAN_INTERVAL_MS)
-    {
-        ultrasonic_scan_count = UltrasonicI2C_Scan(&hi2c2, ultrasonic_scan_addr, ULTRASONIC_SCAN_ADDR_MAX);
-        ultrasonic_last_scan_tick = now_ms;
-    }
+    uart_printf(&huart1,
+                "SR09 L_ON=%u L_MM=%u LW=%d LR=%d R_ON=%u R_MM=%u RW=%d RR=%d\r\n",
+                ultrasonic_left->online,
+                ultrasonic_left->distance_mm,
+                (int)ultrasonic_left->write_status,
+                (int)ultrasonic_left->read_status,
+                ultrasonic_right->online,
+                ultrasonic_right->distance_mm,
+                (int)ultrasonic_right->write_status,
+                (int)ultrasonic_right->read_status);
 }
 
 const UltrasonicI2C_t *User_GetUltrasonicLeft(void)
 {
-    return &ultrasonic_left;
+    return Ultrasonic_Task_GetLeft();
 }
 
 const UltrasonicI2C_t *User_GetUltrasonicRight(void)
 {
-    return &ultrasonic_right;
+    return Ultrasonic_Task_GetRight();
 }
 
 void User_Task(void const *argument)
 {
     TickType_t systick = 0;
     (void)argument;
-    // User_Ultrasonic_Init();
-
 #if CAN_RAW_DEBUG_ENABLE
     BSP_CAN_DebugRxFrame_t can_debug_frame;
     uint32_t last_no_frame_print = 0U;
@@ -82,9 +73,9 @@ void User_Task(void const *argument)
         // Vofa_Send_shoot_Info(&huart6, localgimbal);
         // Vofa_Send_chassis_Info(&huart6, local_chassis);
         // Vofa_Send_Motor_Info(&huart6, local_chassis);
-        Vofa_Process_RxCommand();
-        // User_Ultrasonic_Update();
-        Vofa_Send_Brake_Debug_Info(&huart6, get_chassis_control_point());
+        // Vofa_Process_RxCommand();
+        // User_Ultrasonic_DebugPrint();
+        // Vofa_Send_Brake_Debug_Info(&huart6, get_chassis_control_point());
         // Vofa_Send_Ultrasonic_Info(&huart6,
                                   // &ultrasonic_left,
                                   // &ultrasonic_right,

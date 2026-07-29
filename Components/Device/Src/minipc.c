@@ -86,6 +86,31 @@ bool MiniPC_UpdateChassisCmdFromBuffer(const uint8_t *buf, uint32_t len)
     return true;
 }
 
+bool MiniPC_UpdateChassisCmdFromStream(const uint8_t *buf, uint32_t len)
+{
+    if (buf == NULL || len < MINIPC_CHASSIS_CMD_FRAME_LENGTH)
+    {
+        return false;
+    }
+
+    bool updated = false;
+    for (uint32_t i = 0U; i <= len - MINIPC_CHASSIS_CMD_FRAME_LENGTH; i++)
+    {
+        if (buf[i] != MINIPC_FRAME_HEADER)
+        {
+            continue;
+        }
+
+        if (MiniPC_UpdateChassisCmdFromBuffer(&buf[i], MINIPC_CHASSIS_CMD_FRAME_LENGTH))
+        {
+            updated = true;
+            i += MINIPC_CHASSIS_CMD_FRAME_LENGTH - 1U;
+        }
+    }
+
+    return updated;
+}
+
 const MiniPC_ChassisCmd_Typedef *MiniPC_GetChassisCmdPoint(void)
 {
     return &chassis_cmd;
@@ -117,7 +142,11 @@ static void MiniPC_BuildChassisOdomFrame(uint8_t *tx_buf, const MiniPC_ChassisOd
     MiniPC_PackU16(&tx_buf[29], odom->motor_ecd[1]);
     MiniPC_PackU16(&tx_buf[31], odom->motor_ecd[2]);
     MiniPC_PackU16(&tx_buf[33], odom->motor_ecd[3]);
-    tx_buf[35] = MiniPC_FrameChecksum(tx_buf, MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
+    MiniPC_PackU16(&tx_buf[35], odom->left_mm);
+    MiniPC_PackU16(&tx_buf[37], odom->right_mm);
+    tx_buf[39] = odom->left_online;
+    tx_buf[40] = odom->right_online;
+    tx_buf[41] = MiniPC_FrameChecksum(tx_buf, MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
 }
 
 bool MiniPC_SendChassisOdomUSB(const MiniPC_ChassisOdom_Typedef *odom)
