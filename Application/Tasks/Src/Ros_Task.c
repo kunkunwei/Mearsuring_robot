@@ -36,11 +36,11 @@ void Ros_Task(void const *argument)
                 .distance = odom->distance,
                 .vx = odom->vx,
                 .wz = odom->wz,
-                .motor_ecd = {
-                    local_chassis->chassis_motor[0].chassis_motor_measure->ecd,
-                    local_chassis->chassis_motor[1].chassis_motor_measure->ecd,
-                    local_chassis->chassis_motor[2].chassis_motor_measure->ecd,
-                    local_chassis->chassis_motor[3].chassis_motor_measure->ecd,
+                .motor_pos_deg = {
+                    local_chassis->chassis_motor[0].pos_deg,
+                    local_chassis->chassis_motor[1].pos_deg,
+                    local_chassis->chassis_motor[2].pos_deg,
+                    local_chassis->chassis_motor[3].pos_deg,
                 },
                 .left_mm = (left_ultrasonic != NULL) ? left_ultrasonic->distance_mm : 0U,
                 .right_mm = (right_ultrasonic != NULL) ? right_ultrasonic->distance_mm : 0U,

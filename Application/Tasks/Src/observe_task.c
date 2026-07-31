@@ -214,7 +214,14 @@ static void UpdateOdometry(const OdomOutput_t *output)
     chassis_odom.motion_mode = (uint8_t)output->motion_mode;
     chassis_odom.valid = output->valid;
 
-    chassis_odom.yaw = WrapPi(chassis_odom.yaw + output->dtheta_rad);
+    if (local_chassis_move != NULL && local_chassis_move->chassis_INS_angle != NULL)
+    {
+        chassis_odom.yaw = WrapPi(*(local_chassis_move->chassis_INS_angle + INS_YAW_ADDRESS_OFFSET));
+    }
+    else
+    {
+        chassis_odom.yaw = WrapPi(chassis_odom.yaw + output->dtheta_rad);
+    }
     chassis_odom.x += output->ds_m * cosf(chassis_odom.yaw);
     chassis_odom.y += output->ds_m * sinf(chassis_odom.yaw);
     chassis_odom.distance += output->ds_m;
