@@ -1,15 +1,13 @@
 ﻿#include "Chassis_task.h"
 #include "main.h"
+#include "FreeRTOS.h"
+#include "task.h"
 #include "remote_control.h"
 #include "observe_task.h"
 #include "minipc.h"
 // ============================================================
-#include "bsp_dwt.h"
 #include "monitor.h"
 #include "mymotor.h"
-#include "usart.h"
-#include "vofa.h"
-#include "chassis_mit_ctrl.h"
 
 // ============================================================
 
@@ -65,151 +63,6 @@ static fp32 chassis_wrap_deg(fp32 angle)
         angle += 360.0f;
     }
     return angle;
-}
-
-static void chassis_mit_control_reset_all(chassis_move_t *chassis)
-{
-    if (chassis == NULL)
-    {
-        return;
-    }
-
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        chassis->chassis_motor[i].speed_set = 0.0f;
-        chassis->chassis_motor[i].speed_set_rpm = 0.0f;
-        Chassis_Mit_ResetMotor(&chassis->chassis_motor[i],
-                               &chassis->chassis_pid.motor_speed_pid[i]);
-    }
-    old_PID_clear(&chassis->chassis_pid.chassis_yaw_gyro_pid);
-}
-
-static void chassis_hold_test_reset(chassis_move_t *chassis)
-{
-    if (chassis == NULL)
-    {
-        return;
-    }
-
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        chassis->chassis_motor[i].hold_pos_ready = 0U;
-        chassis->chassis_motor[i].hold_pos_error_deg = 0.0f;
-        old_PID_clear(&chassis->chassis_pid.motor_speed_pid[i]);
-    }
-}
-
-static uint8_t chassis_hold_feedback_ready(const chassis_move_t *chassis)
-{
-    if (chassis == NULL)
-    {
-        return 0U;
-    }
-
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        const dji_motor_measure_t *measure = chassis->chassis_motor[i].chassis_motor_measure;
-        if (!vesc_motor_status_is_online(measure, CHASSIS_MOTOR_STATUS1_TIMEOUT_MS) ||
-            !vesc_motor_status4_is_online(measure, CHASSIS_MOTOR_STATUS4_TIMEOUT_MS))
-        {
-            return 0U;
-        }
-    }
-    return 1U;
-}
-
-static void chassis_hold_position_control(Chassis_Motor_t *motor, PidTypeDef *hold_state)
-{
-    if (motor == NULL || hold_state == NULL)
-    {
-        return;
-    }
-
-    motor->speed_set = 0.0f;
-    motor->speed_set_rpm = 0.0f;
-
-    if (!vesc_motor_status_is_online(motor->chassis_motor_measure, CHASSIS_MOTOR_STATUS1_TIMEOUT_MS) ||
-        !vesc_motor_status4_is_online(motor->chassis_motor_measure, CHASSIS_MOTOR_STATUS4_TIMEOUT_MS))
-    {
-        Chassis_Mit_ResetMotor(motor, hold_state);
-        motor->hold_pos_ready = 0U;
-        motor->hold_pos_error_deg = 0.0f;
-        return;
-    }
-
-    if (motor->hold_pos_ready == 0U)
-    {
-        motor->hold_pos_ready = 1U;
-        motor->hold_pos_ref_deg = motor->pos_deg;
-        motor->hold_pos_error_deg = 0.0f;
-        motor->target_current = 0;
-        old_PID_clear(hold_state);
-        return;
-    }
-
-    fp32 pos_error_deg = motor->hold_pos_ref_deg - motor->pos_deg;
-    pos_error_deg = fp32_constrain(pos_error_deg,
-                                   -CHASSIS_HOLD_POS_ERROR_MAX_DEG,
-                                   CHASSIS_HOLD_POS_ERROR_MAX_DEG);
-    motor->hold_pos_error_deg = pos_error_deg;
-
-    const fp32 speed_damping = -CHASSIS_HOLD_DAMP_CURRENT_PER_RPM * motor->speed_rpm;
-    const fp32 static_ff = (chassis_abs(pos_error_deg) > CHASSIS_HOLD_STATIC_DEADBAND_DEG) ?
-                           (CHASSIS_HOLD_STATIC_CURRENT * chassis_sign(pos_error_deg)) :
-                           0.0f;
-
-    hold_state->set = 0.0f;
-    hold_state->fdb = motor->pos_deg - motor->hold_pos_ref_deg;
-    hold_state->error[0] = pos_error_deg;
-    hold_state->Pout = CHASSIS_HOLD_KP_CURRENT_PER_DEG * pos_error_deg;
-    hold_state->Dout = speed_damping;
-    hold_state->Iout = static_ff;
-    hold_state->out = fp32_constrain(hold_state->Pout + hold_state->Dout + hold_state->Iout,
-                                     -CHASSIS_HOLD_MAX_CURRENT,
-                                     CHASSIS_HOLD_MAX_CURRENT);
-    motor->target_current = (int16_t)hold_state->out;
-}
-
-static void chassis_hold_test_control(chassis_move_t *chassis)
-{
-    if (chassis == NULL)
-    {
-        return;
-    }
-
-    chassis->state_set.vx = 0.0f;
-    chassis->state_set.wz = 0.0f;
-    old_PID_clear(&chassis->chassis_pid.chassis_yaw_gyro_pid);
-
-    if (chassis_hold_feedback_ready(chassis) == 0U)
-    {
-        for (uint8_t i = 0U; i < 4U; i++)
-        {
-            Chassis_Mit_ResetMotor(&chassis->chassis_motor[i],
-                                   &chassis->chassis_pid.motor_speed_pid[i]);
-            chassis->chassis_motor[i].hold_pos_ready = 0U;
-            chassis->chassis_motor[i].hold_pos_error_deg = 0.0f;
-        }
-        return;
-    }
-
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        chassis_hold_position_control(&chassis->chassis_motor[i],
-                                      &chassis->chassis_pid.motor_speed_pid[i]);
-    }
-}
-
-static void chassis_update_auto_hold(chassis_move_t *chassis, uint8_t hold_requested)
-{
-    if (chassis == NULL || chassis->auto_hold_active == hold_requested)
-    {
-        return;
-    }
-
-    chassis->auto_hold_active = hold_requested;
-    chassis_mit_control_reset_all(chassis);
-    chassis_hold_test_reset(chassis);
 }
 
 static void chassis_limit_wheel_speed_keep_ratio(fp32 wheel_speed[4])
@@ -268,9 +121,42 @@ static void chassis_apply_turn_min_rpm(chassis_move_t *chassis)
 }
 // 搴曠洏杩愬姩鏁版嵁
 static chassis_move_t chassis_move;
+static Chassis_Current_Command_t chassis_current_command;
 static volatile bool chassis_init_done = false; // 鍒濆鍖栧畬鎴愭爣蹇楋紝缃綅鍚庡叾浠栦换鍔℃墠鍙畨鍏ㄨ闂?chassis 鍐呮寚閽?// 浠庝簯鍙伴€氫俊鑾峰彇鎺у埗鍛戒护
 
 // ============================================================
+
+static void chassis_publish_current_command(const float current_a[4], uint32_t now_tick)
+{
+    if (current_a == NULL)
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL();
+    for (uint8_t i = 0U; i < 4U; i++)
+    {
+        chassis_current_command.current_a[i] = current_a[i];
+    }
+    chassis_current_command.tick = now_tick;
+    chassis_current_command.sequence++;
+    taskEXIT_CRITICAL();
+}
+
+bool chassis_get_current_command(Chassis_Current_Command_t *command, uint32_t now_tick)
+{
+    if (command == NULL)
+    {
+        return false;
+    }
+
+    taskENTER_CRITICAL();
+    *command = chassis_current_command;
+    taskEXIT_CRITICAL();
+
+    return command->sequence != 0U &&
+           (uint32_t)(now_tick - command->tick) <= CHASSIS_CURRENT_COMMAND_TIMEOUT_MS;
+}
 
 static void chassis_init(chassis_move_t *chassis_move_init);
 void chassis_set_mode(chassis_move_t *chassis_move_mode);
@@ -317,10 +203,6 @@ static void chassis_init(chassis_move_t *chassis_move_init)
         return;
     }
     uint8_t i;
-    static const fp32 motor_speed_pid[3] = {M3505_MOTOR_SPEED_PID_KP, M3505_MOTOR_SPEED_PID_KI, M3505_MOTOR_SPEED_PID_KD};
-    static const fp32 chassis_yaw_gyro_pid[3] = {YAW_SPEED_PID_KP, YAW_SPEED_PID_KI, YAW_SPEED_PID_KD};
-    //搴曠洏閫熷害鐜痯id鍊?    const static fp32 motor_speed_pid[3] = {M3505_MOTOR_SPEED_PID_KP, M3505_MOTOR_SPEED_PID_KI, M3505_MOTOR_SPEED_PID_KD};
-    // 搴曠洏鏃嬭浆鐜痯id鍊?    const static fp32 chassis_yaw_gyro_pid[3] = {YAW_SPEED_PID_KP, YAW_SPEED_PID_KI, YAW_SPEED_PID_KD};
     // 涓€闃朵綆閫氭护娉㈠垵濮嬪寲
     static const fp32 chassis_x_order_filter[1] = {CHASSIS_ACCEL_X_NUM};
 
@@ -328,7 +210,6 @@ static void chassis_init(chassis_move_t *chassis_move_init)
     chassis_move_init->mode.chassis_mode = CHASSIS_FORCE_RAW;
     chassis_move_init->mode.last_chassis_mode = CHASSIS_FORCE_RAW;
     chassis_move_init->mode.last_normol_channel = 0;
-    chassis_move_init->auto_hold_active = 0U;
 
     // 鑾峰彇閬ユ帶鍣ㄦ寚閽?    chassis_move_init->chassis_RC = get_remote_control_point();
     chassis_move_init->chassis_RC = get_remote_control_point();
@@ -342,12 +223,17 @@ static void chassis_init(chassis_move_t *chassis_move_init)
     {   // 鑾峰彇搴曠洏椹卞姩杞數鏈烘寚閽?        chassis_move_init->chassis_motor[i].chassis_motor_measure = get_chassis_motor(i);
         chassis_move_init->chassis_motor[i].chassis_motor_measure = get_chassis_motor(i);
         chassis_move_init->chassis_motor[i].last_speed_rpm = 0.0f;
-        chassis_move_init->chassis_motor[i].brake_current_cmd = 0.0f;
-        chassis_move_init->chassis_motor[i].brake_speed_ref_rpm = 0.0f;
-        old_PID_Init(&chassis_move_init->chassis_pid.motor_speed_pid[i], PID_POSITION, motor_speed_pid, M3505_MOTOR_SPEED_PID_MAX_OUT, M3505_MOTOR_SPEED_PID_MAX_IOUT);
+        chassis_move_init->chassis_motor[i].current_cmd_a = 0.0f;
+        chassis_move_init->chassis_motor[i].target_current = 0;
     }
-    // 鍒濆鍖栨棆杞琍ID
-    old_PID_Init(&chassis_move_init->chassis_pid.chassis_yaw_gyro_pid, PID_POSITION, chassis_yaw_gyro_pid, YAW_SPEED_PID_MAX_OUT, YAW_SPEED_PID_MAX_IOUT);
+    Chassis_ControlManager_Init(&chassis_move_init->control_manager, NULL);
+    Chassis_ControlManager_Disable(&chassis_move_init->control_manager,
+                                   &chassis_move_init->control_output);
+    chassis_move_init->last_torque_control_tick = HAL_GetTick();
+    chassis_move_init->next_torque_control_tick =
+        chassis_move_init->last_torque_control_tick + CHASSIS_TORQUE_CONTROL_PERIOD_MS;
+    chassis_publish_current_command(chassis_move_init->control_output.current_a,
+                                    chassis_move_init->last_torque_control_tick);
 
     //鐢ㄤ竴闃舵护娉唬鏇挎枩娉㈠嚱鏁扮敓鎴?    first_order_filter_init(&chassis_move_init->state_set.chassis_cmd_slow_set_vx, CHASSIS_CONTROL_TIME, chassis_x_order_filter);
     // 鍒濆鍖朩Z婊ゆ尝鍣?    first_order_filter_init(&chassis_move_init->state_set.chassis_cmd_slow_set_wz, CHASSIS_CONTROL_TIME, chassis_x_order_filter);
@@ -379,15 +265,17 @@ static void chassis_feedback_update(chassis_move_t *chassis_move_update)
     for (i = 0; i < 4; i++)
     {
         //鏇存柊鐢垫満閫熷害锛堝皢RPM杞崲涓簃/s锛?        // M3508鐢垫満锛歊PM杞崲涓簉ad/s鐨勭郴鏁版槸 2蟺/60 = 0.10471975512
-        chassis_move_update->chassis_motor[i].last_speed_rpm =
-            chassis_move_update->chassis_motor[i].speed_rpm;
+        const fp32 last_speed_rpm = chassis_move_update->chassis_motor[i].last_speed_rpm;
         chassis_move_update->chassis_motor[i].speed_rpm = chassis_move_update->chassis_motor[i].chassis_motor_measure->rpm *
                                                           motor_forward_sign[i];
         chassis_move_update->chassis_motor[i].speed = chassis_move_update->chassis_motor[i].speed_rpm *
                                                       CHASSIS_MOTOR_RPM_TO_VECTOR_SEN;
-        chassis_move_update->chassis_motor[i].accel = chassis_move_update->chassis_pid.motor_speed_pid[i].Dbuf[0] *
+        chassis_move_update->chassis_motor[i].accel =
+                                                      (chassis_move_update->chassis_motor[i].speed_rpm - last_speed_rpm) *
                                                       CHASSIS_CONTROL_FREQUENCE *
                                                       CHASSIS_MOTOR_RPM_TO_VECTOR_SEN;
+        chassis_move_update->chassis_motor[i].last_speed_rpm =
+            chassis_move_update->chassis_motor[i].speed_rpm;
         if (chassis_move_update->chassis_motor[i].chassis_motor_measure->status4_tick !=
             chassis_move_update->chassis_motor[i].last_status4_tick)
         {
@@ -400,7 +288,6 @@ static void chassis_feedback_update(chassis_move_t *chassis_move_update)
                 chassis_move_update->chassis_motor[i].pos_ready = 1U;
                 chassis_move_update->chassis_motor[i].last_pos_raw_deg = pos_raw_deg;
                 chassis_move_update->chassis_motor[i].pos_deg = 0.0f;
-                chassis_move_update->chassis_motor[i].pos_set_deg = 0.0f;
             }
             else
             {
@@ -456,7 +343,6 @@ void chassis_set_mode(chassis_move_t *chassis_move_mode)
         chassis_move_mode->mode.chassis_mode = CHASSIS_FORCE_RAW;
     }
 
-    // 鏇存柊涓婃閬ユ帶鍣ㄦā寮忕姸鎬?   chassis_move_mode->mode.last_chassis_mode = chassis_move_mode->mode.chassis_mode;
     chassis_move_mode->mode.last_normol_channel = chassis_move_mode->chassis_RC->rc.s[FUNCTION_CHANNEL];
 
 }
@@ -498,7 +384,6 @@ void chassis_mode_change_control_transit(chassis_move_t *chassis_move_transit)
     {
         chassis_move_transit->state_set.vx = 0.0f;
         chassis_move_transit->state_set.wz = 0.0f;
-        chassis_hold_test_reset(chassis_move_transit);
     }
 
     // 鍒囧叆鏃犲姏妯″紡锛屾竻绌洪噷绋嬭
@@ -594,7 +479,6 @@ void chassis_set_contorl(chassis_move_t *chassis_move_control)
     {
         chassis_move_control->state_set.vx = 0.0f;
         chassis_move_control->state_set.wz = 0.0f;
-        chassis_update_auto_hold(chassis_move_control, 0U);
         return;
     }
 
@@ -618,16 +502,6 @@ void chassis_set_contorl(chassis_move_t *chassis_move_control)
     chassis_move_control->state_set.vx = target_vx;
     // chassis_move_control->state_set.wz = 0;
     chassis_move_control->state_set.wz = target_wz;
-
-    const uint8_t powered_control_mode =
-        (chassis_move_control->mode.chassis_mode == CHASSIS_MANL_CTRL ||
-         chassis_move_control->mode.chassis_mode == CHASSIS_ROS_CTRL) ? 1U : 0U;
-    const uint8_t zero_command =
-        (chassis_abs(target_vx) <= CHASSIS_HOLD_COMMAND_VX_DEADBAND &&
-         chassis_abs(target_wz) <= CHASSIS_HOLD_COMMAND_WZ_DEADBAND) ? 1U : 0U;
-    chassis_update_auto_hold(chassis_move_control, powered_control_mode && zero_command);
-
-
 }
 
 /**
@@ -637,23 +511,44 @@ void chassis_set_contorl(chassis_move_t *chassis_move_control)
  */
 void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
 {
+    if (chassis_move_control_loop == NULL)
+    {
+        return;
+    }
+
+    const uint32_t now_tick = HAL_GetTick();
     if (chassis_move_control_loop->mode.chassis_mode == CHASSIS_FORCE_RAW )
     {
-        chassis_mit_control_reset_all(chassis_move_control_loop);
+        for (uint8_t i = 0U; i < 4U; i++)
+        {
+            chassis_move_control_loop->chassis_motor[i].speed_set = 0.0f;
+            chassis_move_control_loop->chassis_motor[i].speed_set_rpm = 0.0f;
+            chassis_move_control_loop->chassis_motor[i].current_cmd_a = 0.0f;
+            chassis_move_control_loop->chassis_motor[i].target_current = 0;
+        }
+        Chassis_ControlManager_Disable(&chassis_move_control_loop->control_manager,
+                                       &chassis_move_control_loop->control_output);
+        chassis_publish_current_command(chassis_move_control_loop->control_output.current_a,
+                                        now_tick);
+        chassis_move_control_loop->last_torque_control_tick = now_tick;
+        chassis_move_control_loop->next_torque_control_tick =
+            now_tick + CHASSIS_TORQUE_CONTROL_PERIOD_MS;
         return;
     }
 
-    if (chassis_move_control_loop->mode.chassis_mode == CHASSIS_HOLD_TEST)
+    if ((int32_t)(now_tick - chassis_move_control_loop->next_torque_control_tick) < 0)
     {
-        chassis_hold_test_control(chassis_move_control_loop);
         return;
     }
 
-    if (chassis_move_control_loop->auto_hold_active != 0U)
+    const fp32 control_dt_s =
+        (fp32)(uint32_t)(now_tick - chassis_move_control_loop->last_torque_control_tick) * 0.001f;
+    chassis_move_control_loop->last_torque_control_tick = now_tick;
+    do
     {
-        chassis_hold_test_control(chassis_move_control_loop);
-        return;
+        chassis_move_control_loop->next_torque_control_tick += CHASSIS_TORQUE_CONTROL_PERIOD_MS;
     }
+    while ((int32_t)(now_tick - chassis_move_control_loop->next_torque_control_tick) >= 0);
 
 
     float wheel_speed[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -663,22 +558,10 @@ void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
                                   chassis_move_control_loop->state_set.wz,
                                   wheel_speed);
     chassis_limit_wheel_speed_keep_ratio(wheel_speed);
-    // Do not mix IMU yaw-rate PID into wheel speed while tuning the motor speed loop.
-    old_PID_clear(&chassis_move_control_loop->chassis_pid.chassis_yaw_gyro_pid);
-    const fp32 yaw_pid_force = 0.0f;
-
-    //璁＄畻pid
+    // Store the chassis-frame wheel targets used by the current controller.
     for (i = 0; i < 4; i++)
     {
-        if (i==1||i==2)
-        {
-            chassis_move_control_loop->chassis_motor[i].speed_set = wheel_speed[i] + yaw_pid_force;
-        }
-        else
-        {
-            chassis_move_control_loop->chassis_motor[i].speed_set = wheel_speed[i] - yaw_pid_force;
-        }
-
+        chassis_move_control_loop->chassis_motor[i].speed_set = wheel_speed[i];
     }
 
     for (i = 0; i < 4; i++)
@@ -688,22 +571,43 @@ void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
     }
     chassis_apply_turn_min_rpm(chassis_move_control_loop);
 
-    fp32 brake_ref_abs_speed_rpm = 0.0f;
-    for (i = 0; i < 4; i++)
-    {
-        const fp32 abs_speed_rpm = chassis_abs(chassis_move_control_loop->chassis_motor[i].speed_rpm);
-        if (abs_speed_rpm > brake_ref_abs_speed_rpm)
-        {
-            brake_ref_abs_speed_rpm = abs_speed_rpm;
-        }
-    }
+    Chassis_Control_Input_t control_input = {
+        .enabled = 1U,
+        .pitch_rad = (chassis_move_control_loop->chassis_INS_angle != NULL) ?
+                     *(chassis_move_control_loop->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET) :
+                     0.0f,
+    };
 
     for (i = 0; i < 4; i++)
     {
-        Chassis_Mit_CurrentControl(&chassis_move_control_loop->chassis_motor[i],
-                                   &chassis_move_control_loop->chassis_pid.motor_speed_pid[i],
-                                   brake_ref_abs_speed_rpm);
+        Chassis_Motor_t *motor = &chassis_move_control_loop->chassis_motor[i];
+        control_input.target_rpm[i] = motor->speed_set_rpm;
+        control_input.speed_rpm[i] = motor->speed_rpm;
+        control_input.position_deg[i] = motor->pos_deg;
+        control_input.speed_valid[i] =
+            vesc_motor_status_is_online(motor->chassis_motor_measure,
+                                        CHASSIS_MOTOR_STATUS1_TIMEOUT_MS) ? 1U : 0U;
+        control_input.position_valid[i] =
+            (motor->pos_ready != 0U &&
+             vesc_motor_status4_is_online(motor->chassis_motor_measure,
+                                          CHASSIS_MOTOR_STATUS4_TIMEOUT_MS)) ? 1U : 0U;
     }
+
+    Chassis_ControlManager_Update(&chassis_move_control_loop->control_manager,
+                                  &control_input,
+                                  control_dt_s,
+                                  &chassis_move_control_loop->control_output);
+
+    for (i = 0; i < 4; i++)
+    {
+        Chassis_Motor_t *motor = &chassis_move_control_loop->chassis_motor[i];
+        motor->current_cmd_a = chassis_move_control_loop->control_output.current_a[i];
+        motor->target_current = (int16_t)fp32_constrain(motor->current_cmd_a * 1000.0f,
+                                                        -32768.0f,
+                                                        32767.0f);
+    }
+    chassis_publish_current_command(chassis_move_control_loop->control_output.current_a,
+                                    now_tick);
 
 }
 
@@ -717,18 +621,14 @@ const Chassis_ref_t *get_chassis_ref_point(void)
     return &chassis_move.state_ref;
 }
 
-void chassis_set_motor_speed_pid(fp32 kp, fp32 ki, fp32 kd)
+void chassis_set_mit_gains(fp32 position_kp_ma_per_deg,
+                           fp32 speed_kd_ma_per_rpm,
+                           fp32 friction_ma)
 {
-    const fp32 motor_speed_pid[3] = {kp, ki, kd};
-
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        old_PID_Init(&chassis_move.chassis_pid.motor_speed_pid[i],
-                     PID_POSITION,
-                     motor_speed_pid,
-                     M3505_MOTOR_SPEED_PID_MAX_OUT,
-                     M3505_MOTOR_SPEED_PID_MAX_IOUT);
-    }
+    Chassis_ControlManager_SetDriveGains(&chassis_move.control_manager,
+                                         position_kp_ma_per_deg * 0.001f,
+                                         speed_kd_ma_per_rpm * 0.001f,
+                                         friction_ma * 0.001f);
 }
 
 bool is_chassis_init_done(void)

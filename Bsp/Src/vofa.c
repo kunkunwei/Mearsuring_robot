@@ -14,9 +14,9 @@
 static volatile uint8_t vofa_pid_cmd_pending = 0U;
 static volatile uint16_t vofa_pid_cmd_len = 0U;
 static uint8_t vofa_pid_cmd_buf[VOFA_RX_CMD_MAX_LEN];
-static fp32 vofa_motor_pid_kp = M3505_MOTOR_SPEED_PID_KP;
-static fp32 vofa_motor_pid_ki = M3505_MOTOR_SPEED_PID_KI;
-static fp32 vofa_motor_pid_kd = M3505_MOTOR_SPEED_PID_KD;
+static fp32 vofa_motor_pid_kp = 10.5f;  // MIT position gain, mA/deg
+static fp32 vofa_motor_pid_ki = 10.5f;  // MIT speed gain, mA/rpm
+static fp32 vofa_motor_pid_kd = 250.0f; // friction compensation, mA
 
 static char *Vofa_SkipPidSeparators(char *ptr)
 {
@@ -58,7 +58,7 @@ static bool Vofa_ParsePidItemCommand(char *cmd, fp32 *kp, fp32 *ki, fp32 *kd)
 
     if (pid_item == 'P' || pid_item == 'p')
     {
-        if (value < 0.0f || value > 1000.0f)
+        if (value < 0.0f || value > 50.0f)
         {
             return false;
         }
@@ -66,7 +66,7 @@ static bool Vofa_ParsePidItemCommand(char *cmd, fp32 *kp, fp32 *ki, fp32 *kd)
     }
     else if (pid_item == 'I' || pid_item == 'i')
     {
-        if (value < 0.0f || value > 100.0f)
+        if (value < 0.0f || value > 50.0f)
         {
             return false;
         }
@@ -74,7 +74,7 @@ static bool Vofa_ParsePidItemCommand(char *cmd, fp32 *kp, fp32 *ki, fp32 *kd)
     }
     else
     {
-        if (value < 0.0f || value > M3505_MOTOR_SPEED_PID_MAX_OUT)
+        if (value < 0.0f || value > 500.0f)
         {
             return false;
         }
@@ -170,7 +170,7 @@ void Vofa_Process_RxCommand(void)
         vofa_motor_pid_kp = kp;
         vofa_motor_pid_ki = ki;
         vofa_motor_pid_kd = kd;
-        chassis_set_motor_speed_pid(kp, ki, kd);
+        chassis_set_mit_gains(kp, ki, kd);
     }
 }
 
@@ -215,13 +215,12 @@ HAL_StatusTypeDef Vofa_Send_chassis_Info(UART_HandleTypeDef *huart, const chassi
             chassis->chassis_motor[0].speed_set,
             chassis->chassis_motor[0].target_current,
             chassis->chassis_motor[0].chassis_motor_measure->current,
-            chassis->chassis_pid.motor_speed_pid[0].Dout,
+            chassis->control_output.speed_current_a[0],
             chassis->chassis_motor[0].speed,
-            // chassis->chassis_motor[0].chassis_motor_measure->current,
-            // chassis->chassis_pid.motor_speed_pid[3].out
-
-
-
+            (float)chassis->control_output.state,
+            (float)chassis->control_output.fault,
+            chassis->control_output.raw_current_a[0],
+            chassis->chassis_motor[0].current_cmd_a,
         }, // 1初始化数据数组
             .tail = VOFA_TAIL // 设置JustFloat协议尾部
         };
@@ -413,34 +412,10 @@ HAL_StatusTypeDef Vofa_Send_Speed_Control_Info(UART_HandleTypeDef *huart, const 
         }
     }
 
-    if (chassis->mode.chassis_mode == CHASSIS_HOLD_TEST)
-    {
-        Vofa_Frame_t frame = {
-            .data = {
-                chassis->chassis_motor[0].speed_set,
-                chassis->chassis_motor[1].speed_set,
-                chassis->chassis_motor[2].speed_set,
-                chassis->chassis_motor[3].speed_set,
-                chassis->chassis_motor[0].speed_rpm,
-                chassis->chassis_motor[1].speed_rpm,
-                chassis->chassis_motor[2].speed_rpm,
-                chassis->chassis_motor[3].speed_rpm,
-                (float)chassis->chassis_motor[0].target_current,
-                (float)chassis->chassis_motor[1].target_current,
-                (float)chassis->chassis_motor[2].target_current,
-                (float)chassis->chassis_motor[3].target_current,
-            },
-            .tail = VOFA_TAIL,
-        };
-
-        return HAL_UART_Transmit(huart, (uint8_t *)&frame, sizeof(Vofa_Frame_t), 100);
-    }
-
     /*
      * VOFA+ JustFloat channels:
      * 0-3 wheel speed set rpm, 4-7 wheel speed feedback rpm,
-     * 8 motor1 target_current, 9 MIT position stiffness,
-     * 10 MIT velocity damping, 11 MIT current feedforward.
+     * 8-11 final wheel current command in A.
      */
     Vofa_Frame_t frame = {
         .data = {
@@ -452,10 +427,10 @@ HAL_StatusTypeDef Vofa_Send_Speed_Control_Info(UART_HandleTypeDef *huart, const 
             chassis->chassis_motor[1].speed_rpm,
             chassis->chassis_motor[2].speed_rpm,
             chassis->chassis_motor[3].speed_rpm,
-            (float)chassis->chassis_motor[0].target_current,
-            chassis->chassis_pid.motor_speed_pid[0].Kp,
-            chassis->chassis_pid.motor_speed_pid[0].Ki,
-            chassis->chassis_pid.motor_speed_pid[0].Kd,
+            chassis->chassis_motor[0].current_cmd_a,
+            chassis->chassis_motor[1].current_cmd_a,
+            chassis->chassis_motor[2].current_cmd_a,
+            chassis->chassis_motor[3].current_cmd_a,
         },
         .tail = VOFA_TAIL,
     };
@@ -518,24 +493,24 @@ HAL_StatusTypeDef Vofa_Send_Brake_Debug_Info(UART_HandleTypeDef *huart, const ch
 
     /*
      * VOFA+ JustFloat channels:
-     * 0-3 wheel brake_speed_ref_rpm motor1..4,
+     * 0-3 raw controller current in A,
      * 4-7 wheel speed_rpm motor1..4,
-     * 8-11 target_current motor1..4.
+     * 8-11 slew-limited current in A.
      */
     Vofa_Frame_t frame = {
         .data = {
-            chassis->chassis_motor[0].brake_speed_ref_rpm,
-            chassis->chassis_motor[1].brake_speed_ref_rpm,
-            chassis->chassis_motor[2].brake_speed_ref_rpm,
-            chassis->chassis_motor[3].brake_speed_ref_rpm,
+            chassis->control_output.raw_current_a[0],
+            chassis->control_output.raw_current_a[1],
+            chassis->control_output.raw_current_a[2],
+            chassis->control_output.raw_current_a[3],
             chassis->chassis_motor[0].speed_rpm,
             chassis->chassis_motor[1].speed_rpm,
             chassis->chassis_motor[2].speed_rpm,
             chassis->chassis_motor[3].speed_rpm,
-            (float)chassis->chassis_motor[0].target_current,
-            (float)chassis->chassis_motor[1].target_current,
-            (float)chassis->chassis_motor[2].target_current,
-            (float)chassis->chassis_motor[3].target_current,
+            chassis->chassis_motor[0].current_cmd_a,
+            chassis->chassis_motor[1].current_cmd_a,
+            chassis->chassis_motor[2].current_cmd_a,
+            chassis->chassis_motor[3].current_cmd_a,
         },
         .tail = VOFA_TAIL,
     };

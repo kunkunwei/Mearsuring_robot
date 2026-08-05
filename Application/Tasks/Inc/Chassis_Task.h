@@ -17,7 +17,7 @@
 #define CHASSIS_TASK_H
 #include "main.h"
 #include "remote_control.h"
-#include "old_pid.h"
+#include "chassis_control_manager.h"
 // #include "CAN_Receive.h"
 
 
@@ -64,6 +64,8 @@
 #define CHASSIS_CONTROL_TIME 0.002f
 // 底盘任务控制频率
 #define CHASSIS_CONTROL_FREQUENCE 500.0f
+#define CHASSIS_TORQUE_CONTROL_PERIOD_MS 5U
+#define CHASSIS_CURRENT_COMMAND_TIMEOUT_MS 15U
 
 // // 底盘电机最大速度
 // #define MAX_WHEEL_SPEED 1.0f
@@ -97,39 +99,12 @@
 
 //////////////////////////////////////////////////////////
 
-//底盘电机速度环PID
-#define M3505_MOTOR_SPEED_PID_KP 10.5f
-#define M3505_MOTOR_SPEED_PID_KI 10.5f
-#define M3505_MOTOR_SPEED_PID_KD 700.0f
-#define M3505_MOTOR_SPEED_PID_MAX_OUT 6000.0f	//16000.0f
-#define M3505_MOTOR_SPEED_PID_MAX_IOUT 500.0f
-
-//底盘旋转跟随PID
-#define YAW_SPEED_PID_KP 2.0f
-#define YAW_SPEED_PID_KI 0.20f
-#define YAW_SPEED_PID_KD 0.288f
-#define YAW_SPEED_PID_MAX_OUT 10.0f
-#define YAW_SPEED_PID_MAX_IOUT 2.0f
-
-// MIT-style wheel current control. KP=position stiffness, KI=velocity damping, KD=current feedforward.
-#define CHASSIS_MIT_ACTIVE_RPM_THRESHOLD 3.0f
-#define CHASSIS_MIT_BREAKAWAY_ENTER_RPM 30.0f
-#define CHASSIS_MIT_BREAKAWAY_EXIT_RPM 80.0f
-#define CHASSIS_MIT_RUNNING_FF_RATIO 0.30f
+// Minimum wheel speed used only for commanded in-place turns.
 #define CHASSIS_TURN_MIN_RPM 120.0f
 #define CHASSIS_TURN_MIN_VX_THRESHOLD 0.03f
 #define CHASSIS_TURN_MIN_WZ_THRESHOLD 0.10f
 #define CHASSIS_MOTOR_STATUS1_TIMEOUT_MS 20U
-#define CHASSIS_MOTOR_STATUS4_TIMEOUT_MS 80U
-#define CHASSIS_MIT_POS_ERROR_MAX_DEG 90.0f
-#define CHASSIS_HOLD_POS_ERROR_MAX_DEG 120.0f
-#define CHASSIS_HOLD_STATIC_DEADBAND_DEG 0.2f
-#define CHASSIS_HOLD_KP_CURRENT_PER_DEG 80.0f
-#define CHASSIS_HOLD_DAMP_CURRENT_PER_RPM 8.0f
-#define CHASSIS_HOLD_STATIC_CURRENT 2500.0f
-#define CHASSIS_HOLD_MAX_CURRENT 8000.0f
-#define CHASSIS_HOLD_COMMAND_VX_DEADBAND 0.001f
-#define CHASSIS_HOLD_COMMAND_WZ_DEADBAND 0.001f
+#define CHASSIS_MOTOR_STATUS4_TIMEOUT_MS 50U
 
 //////////////////////////////////////////////////////////
 
@@ -161,25 +136,19 @@ typedef struct
 	float speed_rpm;     // signed motor/wheel feedback speed, rpm
 	float speed_set_rpm; // signed motor/wheel target speed, rpm
 	float pos_deg;       // signed continuous wheel feedback position, degree
-	float pos_set_deg;   // signed continuous wheel target position, degree
 	float last_pos_raw_deg;
 	float last_speed_rpm;
-	float brake_current_cmd;
-	float brake_speed_ref_rpm;
-	float hold_pos_ref_deg;
-	float hold_pos_error_deg;
 	uint32_t last_status4_tick;
-	uint8_t ff_breakaway_active;
-	int8_t ff_last_sign;
-	uint8_t hold_pos_ready;
 	uint8_t pos_ready;
+	float current_cmd_a;
 	int16_t target_current;
 } Chassis_Motor_t;
 typedef struct
 {
-	PidTypeDef motor_speed_pid[4];             //底盘电机速度pid
-	PidTypeDef chassis_yaw_gyro_pid;              //底盘旋转pid
-} Chassis_Pid_t;
+	float current_a[4];
+	uint32_t tick;
+	uint32_t sequence;
+} Chassis_Current_Command_t;
 typedef struct
 {
 	float vx;                     //底盘设定速度 前进方向 前为正，单位 m/s
@@ -211,17 +180,22 @@ typedef struct
 
 	Chassis_mode_t mode;
 	Chassis_Motor_t chassis_motor[4];
-	Chassis_Pid_t chassis_pid;
 	Chassis_set_t state_set;
 	Chassis_ref_t state_ref;
-	uint8_t auto_hold_active;
+	Chassis_Control_Manager_t control_manager;
+	Chassis_Control_Output_t control_output;
+	uint32_t last_torque_control_tick;
+	uint32_t next_torque_control_tick;
 } chassis_move_t;
 
 //
 // 获取底盘结构体指�?const chassis_move_t *get_chassis_control_point(void);
 const chassis_move_t *get_chassis_control_point(void);
 const Chassis_ref_t *get_chassis_ref_point(void);
-void chassis_set_motor_speed_pid(fp32 kp, fp32 ki, fp32 kd);
+void chassis_set_mit_gains(fp32 position_kp_ma_per_deg,
+                           fp32 speed_kd_ma_per_rpm,
+                           fp32 friction_ma);
+bool chassis_get_current_command(Chassis_Current_Command_t *command, uint32_t now_tick);
 fp32 fp32_constrain(fp32 Value, fp32 minValue, fp32 maxValue);
 bool is_chassis_init_done(void);
 

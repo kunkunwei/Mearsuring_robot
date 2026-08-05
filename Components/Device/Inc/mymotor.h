@@ -25,7 +25,6 @@
 #define VESC_MOTOR_2_ID 2U
 #define VESC_MOTOR_3_ID 3U
 #define VESC_MOTOR_4_ID 4U
-#define VESC_CURRENT_A_PER_PID_OUT 0.001f
 /* CAN通信ID定义 */
 /**
  * @brief CAN消息ID枚举

@@ -1,6 +1,5 @@
 #include "main.h"
 #include "can_task.h"
-#include "old_pid.h"
 
 #include "usb.h"
 #include "bsp_can.h"
@@ -15,7 +14,8 @@
 /* CAN Manager Instance */
 
 static void Dji_Motor_chassis_Can_Send(int16_t current_1, int16_t current_2, int16_t current_3,int16_t current_4);
-static void VESC_Motor_chassis_Can_Send(int16_t current_1, int16_t current_2, int16_t current_3, int16_t current_4);
+static void VESC_Motor_chassis_Can_Send(float current_1_a, float current_2_a,
+                                        float current_3_a, float current_4_a);
 
 #define VESC_CONTROL_SEND_PERIOD_MS 5U
 
@@ -49,10 +49,18 @@ void Can_Task(void const *argument)
                                        // 0,
                                        // 0);
 #if CHASSIS_ESC_PROTOCOL == CHASSIS_ESC_PROTOCOL_VESC
-            VESC_Motor_chassis_Can_Send(-local_chassis->chassis_motor[0].target_current,
-                                        local_chassis->chassis_motor[1].target_current,
-                                        local_chassis->chassis_motor[2].target_current,
-                                        -local_chassis->chassis_motor[3].target_current);
+            Chassis_Current_Command_t current_command = {0};
+            if (chassis_get_current_command(&current_command, HAL_GetTick()))
+            {
+                VESC_Motor_chassis_Can_Send(-current_command.current_a[0],
+                                             current_command.current_a[1],
+                                             current_command.current_a[2],
+                                            -current_command.current_a[3]);
+            }
+            else
+            {
+                VESC_Motor_chassis_Can_Send(0.0f, 0.0f, 0.0f, 0.0f);
+            }
 #else
             Dji_Motor_chassis_Can_Send(-local_chassis->chassis_motor[0].target_current,
                                        local_chassis->chassis_motor[1].target_current,
@@ -83,10 +91,11 @@ static void Dji_Motor_chassis_Can_Send(int16_t current_1, int16_t current_2, int
     USER_CAN_TxMessage(&ChassisTxFrame);
 }
 
-static void VESC_Motor_chassis_Can_Send(int16_t current_1, int16_t current_2, int16_t current_3, int16_t current_4)
+static void VESC_Motor_chassis_Can_Send(float current_1_a, float current_2_a,
+                                        float current_3_a, float current_4_a)
 {
-    VESC_Chassis_SetCurrent(VESC_MOTOR_1_ID, (float)current_1 * VESC_CURRENT_A_PER_PID_OUT);
-    VESC_Chassis_SetCurrent(VESC_MOTOR_2_ID, (float)current_2 * VESC_CURRENT_A_PER_PID_OUT);
-    VESC_Chassis_SetCurrent(VESC_MOTOR_3_ID, (float)current_3 * VESC_CURRENT_A_PER_PID_OUT);
-    VESC_Chassis_SetCurrent(VESC_MOTOR_4_ID, (float)current_4 * VESC_CURRENT_A_PER_PID_OUT);
+    VESC_Chassis_SetCurrent(VESC_MOTOR_1_ID, current_1_a);
+    VESC_Chassis_SetCurrent(VESC_MOTOR_2_ID, current_2_a);
+    VESC_Chassis_SetCurrent(VESC_MOTOR_3_ID, current_3_a);
+    VESC_Chassis_SetCurrent(VESC_MOTOR_4_ID, current_4_a);
 }
