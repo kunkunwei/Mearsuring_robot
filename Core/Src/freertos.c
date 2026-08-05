@@ -135,7 +135,7 @@ void MX_FREERTOS_Init(void) {
   StartRosTaskHandle = osThreadCreate(osThread(StartRosTask), NULL);
 
   /* definition and creation of StartChassisTas */
-  osThreadDef(StartChassisTas, Chassis_Task, osPriorityIdle, 0, 512);
+  osThreadDef(StartChassisTas, Chassis_Task, osPriorityAboveNormal, 0, 512);
   StartChassisTasHandle = osThreadCreate(osThread(StartChassisTas), NULL);
 
   /* definition and creation of StartUltrasonic */

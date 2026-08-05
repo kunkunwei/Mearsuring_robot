@@ -14,6 +14,7 @@
 #include "bsp_can.h"
 #include "can.h"
 #include "vofa.h"
+#include "vesc_can_protocol.h"
 
 #define VESC_CAN_PACKET_SET_CURRENT 1U
 #define VESC_CAN_PACKET_STATUS 9U
@@ -129,6 +130,24 @@ void VESC_Chassis_SetCurrent(uint8_t vesc_id, float current_a)
 
     const int32_t current_milli_amp = (int32_t)(current_a * 1000.0f);
     Int32ToCan(current_milli_amp, tx.Data);
+    USER_CAN_TxMessage(&tx);
+}
+
+void VESC_Chassis_SetMechanicalRpm(uint8_t vesc_id, float mechanical_rpm)
+{
+    CAN_TxFrameTypeDef tx = {
+        .hcan = &hcan1,
+        .header.IDE = CAN_ID_EXT,
+        .header.RTR = CAN_RTR_DATA,
+        .header.DLC = 4,
+    };
+
+    const int32_t erpm = VescCan_MechanicalRpmToErpm(mechanical_rpm,
+                                                      VESC_M3508_POLE_PAIRS);
+    if (!VescCan_BuildSetErpmFrame(vesc_id, erpm, &tx.header.ExtId, tx.Data))
+    {
+        return;
+    }
     USER_CAN_TxMessage(&tx);
 }
 

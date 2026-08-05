@@ -33,6 +33,6 @@ extern void Bsp_Tim_Init(void);
   * @brief  Set the BMI088 Heat_Power TIM Capture Compare Register value.
   */
 extern void Heat_Power_Control(uint16_t compare);
-  extern void buzzer_on(uint16_t psc,uint16_t compare);
-  extern void buzzer_off(void);
+extern void Buzzer_SetFrequency(uint32_t frequency_hz);
+extern void buzzer_off(void);
 #endif //BSP_TIM_H

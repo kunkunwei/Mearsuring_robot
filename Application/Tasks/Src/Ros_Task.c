@@ -46,6 +46,7 @@ void Ros_Task(void const *argument)
                 .right_mm = (right_ultrasonic != NULL) ? right_ultrasonic->distance_mm : 0U,
                 .left_online = (left_ultrasonic != NULL) ? left_ultrasonic->online : 0U,
                 .right_online = (right_ultrasonic != NULL) ? right_ultrasonic->online : 0U,
+                .segment_id = odom->segment_id,
             };
 
             (void)MiniPC_SendChassisOdomUART(&huart6, &tx_odom);

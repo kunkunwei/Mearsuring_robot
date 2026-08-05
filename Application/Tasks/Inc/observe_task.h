@@ -26,8 +26,16 @@ typedef struct
     float left_distance;
     float right_distance;
     float wheel_weight[4];
+    float mag_body_ut[3];
+    float mag_yaw;
+    float mag_field_norm_ut;
+    float mag_innovation;
+    float mag_quality;
     uint8_t motion_mode;
+    uint8_t mag_online;
+    uint8_t mag_trusted;
     uint8_t valid;  // 1 when slip is small enough for odom to be trusted.
+    uint8_t segment_id;
 } Chassis_Odom_t;
 
 extern void ObserveTask(void const *argument);

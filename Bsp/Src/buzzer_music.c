@@ -1,96 +1,187 @@
 #include "buzzer_music.h"
 #include "bsp_tim.h"
-#include "cmsis_os.h"
-#include "tim.h" // 引入tim.h以使用htim4
-// 声明外部的TIM4句柄
-extern TIM_HandleTypeDef htim4;
-// 青花瓷乐谱数据
-const music_note_t qinghua_ci[] = {
-    // // 天 青 色 等 烟 雨  而 我 在 等 你
-    // {NOTE_A4, 400}, {NOTE_G4, 200}, {NOTE_A4, 200}, {NOTE_C5, 400}, {NOTE_B4, 200}, {NOTE_A4, 200},
-    // {NOTE_G4, 400}, {NOTE_E4, 200}, {NOTE_G4, 200}, {NOTE_A4, 600}, {REST, 100},
-    // {NOTE_F4, 400}, {NOTE_G4, 200}, {NOTE_A4, 200}, {NOTE_C5, 400}, {NOTE_B4, 200}, {NOTE_A4, 200},
-    // {NOTE_G4, 400}, {NOTE_E4, 200}, {NOTE_G4, 200}, {NOTE_E4, 600}, {REST, 100},
-    // 月 色 被 淘 洗 结 局 如 泼 墨 画 里
-    {NOTE_A4, 400}, {NOTE_B4, 200}, {NOTE_C5, 200}, {NOTE_B4, 400}, {NOTE_A4, 200}, {NOTE_G4, 200},
-    // {NOTE_A4, 400}, {NOTE_F4, 200}, {NOTE_D4, 200}, {NOTE_F4, 600}, {REST, 100},
-    // {NOTE_E4, 400}, {NOTE_G4, 200}, {NOTE_A4, 200}, {NOTE_G4, 400}, {NOTE_E4, 200}, {NOTE_C4, 200},
-    // {NOTE_D4, 400}, {NOTE_C4, 200}, {NOTE_D4, 200}, {NOTE_E4, 600}, {REST, 200}
-};
-// 马里奥「地上BGM」核心乐谱（严格遵循官方旋律，适配蜂鸣器）
-const music_note_t mario_ground_bgm[] = {
-    // 第一乐句（标志性开头：C4→G4→A4→F4→G4→E4）
-    // {NOTE_C4, 200}, {NOTE_C4, 200}, {NOTE_G4, 200}, {NOTE_G4, 200},
-    // {NOTE_A4, 200}, {NOTE_A4, 200}, {NOTE_G4, 400},
-    // {NOTE_F4, 200}, {NOTE_F4, 200}, {NOTE_E4, 200}, {NOTE_E4, 200},
-    // {NOTE_D4, 200}, {NOTE_D4, 200}, {NOTE_C4, 400},
-    // // 第二乐句（重复动机+变奏）
-    // {NOTE_G4, 200}, {NOTE_G4, 200}, {NOTE_F4, 200}, {NOTE_F4, 200},
-    // {NOTE_E4, 200}, {NOTE_E4, 200}, {NOTE_D4, 400},
-    // {NOTE_G4, 200}, {NOTE_G4, 200}, {NOTE_F4, 200}, {NOTE_F4, 200},
-    // {NOTE_E4, 200}, {NOTE_E4, 200}, {NOTE_D4, 400},
-    // 第三乐句（高潮部分：A4→F4→G4→E4）
-    {NOTE_C4, 200}, {NOTE_C4, 200}, {NOTE_G4, 200}, {NOTE_G4, 200},
-    {NOTE_A4, 200}, {NOTE_A4, 200}, {NOTE_G4, 400},
-    // {NOTE_F4, 200}, {NOTE_F4, 200}, {NOTE_E4, 200}, {NOTE_E4, 200},
-    // {NOTE_D4, 200}, {NOTE_D4, 200}, {NOTE_C4, 400},
-    // 结尾（休止+长音，还原原曲收尾）
-    // {REST, 200}, {NOTE_C4, 800}
-};
-// 乐谱长度（自动计算，避免手动计数错误）
-const uint16_t mario_ground_bgm_size = sizeof(mario_ground_bgm) / sizeof(music_note_t);
-const uint16_t qinghua_ci_size = sizeof(qinghua_ci) / sizeof(music_note_t);
+#include <stddef.h>
 
+#define BUZZER_BOOT_NOTE_DURATION_MS 250U
+#define BUZZER_ALARM_STARTUP_GRACE_MS 2000U
+#define BUZZER_ALARM_FREQUENCY_HZ 1000U
+#define BUZZER_ALARM_TONE_MS 120U
+#define BUZZER_ALARM_TONE_GAP_MS 120U
+#define BUZZER_ALARM_MOTOR_GAP_MS 500U
+#define BUZZER_ALARM_REPEAT_GAP_MS 2000U
 
-/**
-  * @brief  根据频率设置蜂鸣器音高（修正TIM4时钟后）
-  * @param  freq: 目标频率(Hz)
-  * @retval 无
-  */
-static void buzzer_set_note(uint16_t freq)
+typedef enum
 {
-    if(freq == 0)
+    BUZZER_PHASE_BOOT = 0,
+    BUZZER_PHASE_IDLE,
+    BUZZER_PHASE_ALARM_TONE,
+    BUZZER_PHASE_ALARM_TONE_GAP,
+    BUZZER_PHASE_ALARM_MOTOR_GAP,
+    BUZZER_PHASE_ALARM_REPEAT_GAP,
+} BuzzerPhase_t;
+
+typedef struct
+{
+    BuzzerPhase_t phase;
+    uint32_t deadline_ms;
+    uint32_t alarm_enable_tick_ms;
+    uint8_t boot_note_index;
+    uint8_t active_offline_mask;
+    uint8_t motor_index;
+    uint8_t beeps_remaining;
+} BuzzerAlertState_t;
+
+static const uint16_t boot_notes_hz[] = {1046U, 1174U, 1568U};
+static BuzzerAlertState_t buzzer_state;
+
+static uint8_t Buzzer_DeadlineReached(uint32_t now_ms, uint32_t deadline_ms)
+{
+    return ((int32_t)(now_ms - deadline_ms) >= 0) ? 1U : 0U;
+}
+
+static uint8_t Buzzer_FindOfflineMotor(uint8_t mask, uint8_t start_index, uint8_t *motor_index)
+{
+    if (motor_index == NULL)
     {
-        buzzer_off();
+        return 0U;
+    }
+
+    for (uint8_t i = start_index; i < 4U; i++)
+    {
+        if ((mask & (uint8_t)(1U << i)) != 0U)
+        {
+            *motor_index = i;
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static void Buzzer_StartAlarmTone(uint32_t now_ms)
+{
+    Buzzer_SetFrequency(BUZZER_ALARM_FREQUENCY_HZ);
+    buzzer_state.phase = BUZZER_PHASE_ALARM_TONE;
+    buzzer_state.deadline_ms = now_ms + BUZZER_ALARM_TONE_MS;
+}
+
+static void Buzzer_StartMotorReport(uint32_t now_ms, uint8_t motor_index)
+{
+    buzzer_state.motor_index = motor_index;
+    buzzer_state.beeps_remaining = motor_index + 1U;
+    Buzzer_StartAlarmTone(now_ms);
+}
+
+void Buzzer_AlertInit(uint32_t now_ms)
+{
+    buzzer_state.phase = BUZZER_PHASE_BOOT;
+    buzzer_state.deadline_ms = now_ms + BUZZER_BOOT_NOTE_DURATION_MS;
+    buzzer_state.alarm_enable_tick_ms = 0U;
+    buzzer_state.boot_note_index = 0U;
+    buzzer_state.active_offline_mask = 0U;
+    buzzer_state.motor_index = 0U;
+    buzzer_state.beeps_remaining = 0U;
+    Buzzer_SetFrequency(boot_notes_hz[0]);
+}
+
+void Buzzer_AlertUpdate(uint32_t now_ms, uint8_t motor_offline_mask)
+{
+    if (buzzer_state.phase == BUZZER_PHASE_BOOT)
+    {
+        if (Buzzer_DeadlineReached(now_ms, buzzer_state.deadline_ms) == 0U)
+        {
+            return;
+        }
+
+        buzzer_state.boot_note_index++;
+        if (buzzer_state.boot_note_index < (uint8_t)(sizeof(boot_notes_hz) / sizeof(boot_notes_hz[0])))
+        {
+            Buzzer_SetFrequency(boot_notes_hz[buzzer_state.boot_note_index]);
+            buzzer_state.deadline_ms = now_ms + BUZZER_BOOT_NOTE_DURATION_MS;
+        }
+        else
+        {
+            buzzer_off();
+            buzzer_state.phase = BUZZER_PHASE_IDLE;
+            buzzer_state.alarm_enable_tick_ms = now_ms + BUZZER_ALARM_STARTUP_GRACE_MS;
+        }
         return;
     }
 
-    // 核心修正：TIM4计数时钟=84MHz/(83+1)=1MHz → ARR = (1000000 / freq) - 1
-    // 加入浮点运算避免整数截断误差，再强制转换为整数
-    uint32_t arr = (uint32_t)((1000000.0f / freq) - 1);
-    // 50%占空比（蜂鸣器发声最稳定）
-    uint32_t ccr = arr / 2;
-
-    // 强制同步TIM4的PSC（与初始化一致，防止其他代码篡改）
-    __HAL_TIM_SET_PRESCALER(&htim4, 83);
-    // 设置ARR（决定频率）
-    __HAL_TIM_SET_AUTORELOAD(&htim4, arr);
-    // 设置CCR（决定占空比）
-    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, ccr);
-    // 启动PWM输出
-    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
-}
-
-
-
-
-// 播放音乐核心函数
-void play_music(const music_note_t* score, uint16_t score_size)
-{
-    for (int i = 0; i < score_size; i++)
+    if (Buzzer_DeadlineReached(now_ms, buzzer_state.alarm_enable_tick_ms) == 0U)
     {
-        buzzer_set_note(score[i].freq);
-        osDelay(score[i].duration); // 延时控制音符时长
+        return;
     }
-    buzzer_off();
-}
 
+    motor_offline_mask &= 0x0FU;
+    if (motor_offline_mask != buzzer_state.active_offline_mask)
+    {
+        buzzer_state.active_offline_mask = motor_offline_mask;
+        buzzer_state.phase = BUZZER_PHASE_IDLE;
+        buzzer_off();
+    }
 
-// 开机自启函数（在main函数中调用）
-void boot_play_music(void)
-{
-    // 确保TIM4初始化完成后调用
-    // HAL_Delay(500); // 系统初始化延时，避免抢占初始化资源
-    // play_music(qinghua_ci, qinghua_ci_size);
-    play_music(mario_ground_bgm, mario_ground_bgm_size);
+    if (motor_offline_mask == 0U)
+    {
+        return;
+    }
+
+    if (buzzer_state.phase == BUZZER_PHASE_IDLE)
+    {
+        uint8_t motor_index = 0U;
+        if (Buzzer_FindOfflineMotor(motor_offline_mask, 0U, &motor_index) != 0U)
+        {
+            Buzzer_StartMotorReport(now_ms, motor_index);
+        }
+        return;
+    }
+
+    if (Buzzer_DeadlineReached(now_ms, buzzer_state.deadline_ms) == 0U)
+    {
+        return;
+    }
+
+    if (buzzer_state.phase == BUZZER_PHASE_ALARM_TONE)
+    {
+        buzzer_off();
+        buzzer_state.beeps_remaining--;
+        if (buzzer_state.beeps_remaining > 0U)
+        {
+            buzzer_state.phase = BUZZER_PHASE_ALARM_TONE_GAP;
+            buzzer_state.deadline_ms = now_ms + BUZZER_ALARM_TONE_GAP_MS;
+            return;
+        }
+
+        uint8_t next_motor_index = 0U;
+        if (Buzzer_FindOfflineMotor(motor_offline_mask,
+                                    buzzer_state.motor_index + 1U,
+                                    &next_motor_index) != 0U)
+        {
+            buzzer_state.motor_index = next_motor_index;
+            buzzer_state.beeps_remaining = next_motor_index + 1U;
+            buzzer_state.phase = BUZZER_PHASE_ALARM_MOTOR_GAP;
+            buzzer_state.deadline_ms = now_ms + BUZZER_ALARM_MOTOR_GAP_MS;
+        }
+        else
+        {
+            buzzer_state.phase = BUZZER_PHASE_ALARM_REPEAT_GAP;
+            buzzer_state.deadline_ms = now_ms + BUZZER_ALARM_REPEAT_GAP_MS;
+        }
+        return;
+    }
+
+    if (buzzer_state.phase == BUZZER_PHASE_ALARM_TONE_GAP ||
+        buzzer_state.phase == BUZZER_PHASE_ALARM_MOTOR_GAP)
+    {
+        Buzzer_StartAlarmTone(now_ms);
+        return;
+    }
+
+    if (buzzer_state.phase == BUZZER_PHASE_ALARM_REPEAT_GAP)
+    {
+        uint8_t motor_index = 0U;
+        if (Buzzer_FindOfflineMotor(motor_offline_mask, 0U, &motor_index) != 0U)
+        {
+            Buzzer_StartMotorReport(now_ms, motor_index);
+        }
+    }
 }

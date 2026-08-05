@@ -1,6 +1,9 @@
 #include "observe_task.h"
 #include "Chassis_Task.h"
 #include "mymotor.h"
+#include "ist8310.h"
+#include "magnetic_heading.h"
+#include "minipc.h"
 #include "odometry.h"
 #include <math.h>
 #include <string.h>
@@ -11,6 +14,8 @@
 #define ODOM_STILL_VX_THRESHOLD 0.006f
 #define ODOM_STILL_WZ_THRESHOLD 0.020f
 #define ODOM_STILL_ACCEL_THRESHOLD 0.120f
+#define MAGNETOMETER_UPDATE_PERIOD_MS 10U
+#define MAGNETOMETER_STALE_TIMEOUT_MS 50U
 
 static KalmanFilter_Info_TypeDef vaEstimateKF;
 static uint8_t vaEstimateKF_ready = 0U;
@@ -48,13 +53,36 @@ static fp32 imu_bias_estimate = -0.4f;
 static Chassis_Odom_t chassis_odom;
 static const chassis_move_t *local_chassis_move;
 static OdomEstimator_t odom_estimator;
+static MagneticHeadingEstimator_t magnetic_heading_estimator;
+static MagneticHeadingOutput_t magnetic_heading_output;
+
+static const MagneticHeadingConfig_t magnetic_heading_config = {
+    .calibration = {
+        .bias_ut = {0.0f, 0.0f, 0.0f},
+        .soft_iron = {
+            {1.0f, 0.0f, 0.0f},
+            {0.0f, 1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f},
+        },
+        .axis_source = {0U, 1U, 2U},
+        .axis_sign = {1, 1, 1},
+    },
+    .field_norm_min_ut = 15.0f,
+    .field_norm_max_ut = 100.0f,
+    .field_norm_tolerance_ratio = 0.30f,
+    .heading_innovation_limit_rad = 0.7853981634f,
+    .correction_gain = 0.25f,
+    .max_correction_rate_rad_s = 0.0349065850f,
+    .reference_update_gain = 0.01f,
+};
 
 static void CalculateWheelLinearSpeed(const chassis_move_t *chassis, float *left_speed, float *right_speed);
 static void UpdateIMUBias(fp32 raw_imu_accel, float aver_v);
 static void BuildOdomInput(const chassis_move_t *chassis, OdomInput_t *input);
-static void UpdateOdometry(const OdomOutput_t *output);
+static void UpdateOdometry(const OdomOutput_t *output, uint8_t magnetic_sample_updated);
 static uint8_t IsChassisStill(float vx, float wz, float accel);
 static void ZeroVelocityEstimate(void);
+static void ResetSegmentOdometry(uint8_t segment_id);
 static float WrapPi(float angle);
 
 void ObserveTask(void const *argument)
@@ -69,6 +97,7 @@ void ObserveTask(void const *argument)
     local_chassis_move = get_chassis_control_point();
     xvEstimateKF_Init(&vaEstimateKF);
     OdomEstimator_Init(&odom_estimator, NULL);
+    MagneticHeading_Init(&magnetic_heading_estimator, &magnetic_heading_config);
 
     float vrb = 0.0f;
     float vlb = 0.0f;
@@ -78,10 +107,24 @@ void ObserveTask(void const *argument)
     OdomInput_t odom_input;
     OdomOutput_t odom_output;
     TickType_t systick = 0;
+    TickType_t last_magnetic_update_tick = 0;
 
     for (;;)
     {
         systick = osKernelSysTick();
+
+        uint8_t requested_segment_id = 0U;
+        if (MiniPC_TakeOdomResetRequest(&requested_segment_id))
+        {
+            ResetSegmentOdometry(requested_segment_id);
+        }
+
+        uint8_t magnetic_sample_updated = 0U;
+        if ((TickType_t)(systick - last_magnetic_update_tick) >= MAGNETOMETER_UPDATE_PERIOD_MS)
+        {
+            last_magnetic_update_tick = systick;
+            magnetic_sample_updated = IST8310_Info_Update(&ist8310_Info) ? 1U : 0U;
+        }
 
         CalculateWheelLinearSpeed(local_chassis_move, &vlb, &vrb);
 
@@ -107,7 +150,7 @@ void ObserveTask(void const *argument)
         v_real = vel_acc[0];
         BuildOdomInput(local_chassis_move, &odom_input);
         OdomEstimator_Update(&odom_estimator, &odom_input, &odom_output);
-        UpdateOdometry(&odom_output);
+        UpdateOdometry(&odom_output, magnetic_sample_updated);
 
         osDelayUntil(&systick, OBSERVE_TASK_PERIOD_MS);
     }
@@ -186,7 +229,7 @@ static void BuildOdomInput(const chassis_move_t *chassis, OdomInput_t *input)
     }
 }
 
-static void UpdateOdometry(const OdomOutput_t *output)
+static void UpdateOdometry(const OdomOutput_t *output, uint8_t magnetic_sample_updated)
 {
     if (output == NULL)
     {
@@ -214,14 +257,49 @@ static void UpdateOdometry(const OdomOutput_t *output)
     chassis_odom.motion_mode = (uint8_t)output->motion_mode;
     chassis_odom.valid = output->valid;
 
-    if (local_chassis_move != NULL && local_chassis_move->chassis_INS_angle != NULL)
+    float corrected_heading = output->heading_rad;
+    if (magnetic_sample_updated != 0U &&
+        local_chassis_move != NULL &&
+        local_chassis_move->chassis_INS_angle != NULL)
     {
-        chassis_odom.yaw = WrapPi(*(local_chassis_move->chassis_INS_angle + INS_YAW_ADDRESS_OFFSET));
+        const MagneticHeadingInput_t magnetic_input = {
+            .raw_mag_ut = {
+                ist8310_Info.raw_mag[0],
+                ist8310_Info.raw_mag[1],
+                ist8310_Info.raw_mag[2],
+            },
+            .roll_rad = *(local_chassis_move->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET),
+            .pitch_rad = *(local_chassis_move->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET),
+            .predicted_yaw_rad = output->heading_rad,
+            .dt_s = MAGNETOMETER_UPDATE_PERIOD_MS / 1000.0f,
+            .sample_valid = 1U,
+        };
+        MagneticHeading_Update(&magnetic_heading_estimator,
+                               &magnetic_input,
+                               &magnetic_heading_output);
+        if (magnetic_heading_output.trusted != 0U)
+        {
+            corrected_heading = magnetic_heading_output.corrected_yaw_rad;
+            OdomEstimator_SetHeading(&odom_estimator, corrected_heading);
+        }
     }
-    else
+
+    if (ist8310_Info.update_tick == 0U ||
+        (uint32_t)(HAL_GetTick() - ist8310_Info.update_tick) > MAGNETOMETER_STALE_TIMEOUT_MS)
     {
-        chassis_odom.yaw = WrapPi(chassis_odom.yaw + output->dtheta_rad);
+        magnetic_heading_output.trusted = 0U;
     }
+
+    chassis_odom.yaw = WrapPi(corrected_heading);
+    chassis_odom.mag_body_ut[0] = magnetic_heading_output.body_mag_ut[0];
+    chassis_odom.mag_body_ut[1] = magnetic_heading_output.body_mag_ut[1];
+    chassis_odom.mag_body_ut[2] = magnetic_heading_output.body_mag_ut[2];
+    chassis_odom.mag_yaw = magnetic_heading_output.magnetic_yaw_rad;
+    chassis_odom.mag_field_norm_ut = magnetic_heading_output.field_norm_ut;
+    chassis_odom.mag_innovation = magnetic_heading_output.heading_innovation_rad;
+    chassis_odom.mag_quality = magnetic_heading_output.quality;
+    chassis_odom.mag_online = ist8310_Info.online;
+    chassis_odom.mag_trusted = magnetic_heading_output.trusted;
     chassis_odom.x += output->ds_m * cosf(chassis_odom.yaw);
     chassis_odom.y += output->ds_m * sinf(chassis_odom.yaw);
     chassis_odom.distance += output->ds_m;
@@ -310,5 +388,26 @@ void chassis_odom_reset(void)
 {
     memset(&chassis_odom, 0, sizeof(chassis_odom));
     OdomEstimator_Reset(&odom_estimator);
+    MagneticHeading_Reset(&magnetic_heading_estimator);
+    memset(&magnetic_heading_output, 0, sizeof(magnetic_heading_output));
     ZeroVelocityEstimate();
+}
+
+static void ResetSegmentOdometry(uint8_t segment_id)
+{
+    chassis_odom.x = 0.0f;
+    chassis_odom.y = 0.0f;
+    chassis_odom.distance = 0.0f;
+    chassis_odom.vx = 0.0f;
+    chassis_odom.wz = 0.0f;
+    chassis_odom.slip = 0.0f;
+    chassis_odom.front_distance = 0.0f;
+    chassis_odom.rear_distance = 0.0f;
+    chassis_odom.left_distance = 0.0f;
+    chassis_odom.right_distance = 0.0f;
+    memset(chassis_odom.wheel_weight, 0, sizeof(chassis_odom.wheel_weight));
+    chassis_odom.motion_mode = (uint8_t)ODOM_MOTION_STILL;
+    chassis_odom.valid = 0U;
+    chassis_odom.segment_id = segment_id;
+    OdomEstimator_ResetDistanceOrigin(&odom_estimator);
 }

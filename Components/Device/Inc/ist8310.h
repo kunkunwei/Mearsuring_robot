@@ -4,6 +4,7 @@
 
 #ifndef IST8310_H
 #define IST8310_H
+#include <stdbool.h>
 #include "main.h"
 #define IST8310_DATA_READY_BIT 2
 #define IST8310_NO_ERROR 0x00
@@ -30,6 +31,10 @@ typedef struct ist8310_real_data_t
 
     float mag_bias[3];
     float mag_scale[3];
+    uint32_t update_tick;
+    uint8_t online;
+    uint8_t data_ready;
+    uint8_t last_hal_status;
 } ist8310_real_data_t;
 
 extern ist8310_real_data_t ist8310_Info;
@@ -38,5 +43,5 @@ extern void ist8310_read_over(uint8_t *status_buf, ist8310_real_data_t *ist8310_
 extern void ist8310_read_mag(fp32 mag[3]);
 extern void mag_calibration(ist8310_real_data_t *ist8310_Info);
 extern void simple_mag_calibration_messure(ist8310_real_data_t *ist8310_Info);
-extern void IST8310_Info_Update(ist8310_real_data_t *ist8310_Info);
+extern bool IST8310_Info_Update(ist8310_real_data_t *ist8310_Info);
 #endif //IST8310_H

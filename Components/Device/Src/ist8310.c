@@ -29,6 +29,8 @@
 #define IST8310_WHO_AM_I_VALUE 0x10 //device ID
 
 #define IST8310_WRITE_REG_NUM 4
+#define IST8310_STATUS_REG 0x02U
+#define IST8310_STATUS_AND_DATA_LENGTH 7U
 
 ist8310_real_data_t ist8310_Info={
     .status=0,
@@ -37,7 +39,11 @@ ist8310_real_data_t ist8310_Info={
     .mag_max={mag_max_x,mag_max_y,mag_max_z},
     .mag_min={mag_min_x,mag_min_y,mag_min_z},
     .mag_bias={(mag_max_x+mag_min_x)/2.0f,(mag_max_y+mag_min_y)/2.0f,(mag_max_z+mag_min_z)/2.0f},
-    .mag_scale={2.0f/(mag_max_x-mag_min_x),2.0f/(mag_max_y-mag_min_y),2.0f/(mag_max_z-mag_min_z)}
+    .mag_scale={2.0f/(mag_max_x-mag_min_x),2.0f/(mag_max_y-mag_min_y),2.0f/(mag_max_z-mag_min_z)},
+    .update_tick=0U,
+    .online=0U,
+    .data_ready=0U,
+    .last_hal_status=(uint8_t)HAL_ERROR,
 };
 //第一列:IST8310的寄存器
 //第二列:需要写入的寄存器值
@@ -169,8 +175,34 @@ void simple_mag_calibration_messure(ist8310_real_data_t *ist8310_Info)
         ist8310_Info->mag_scale[i] = 1.0f / scale;
     }
 }
-void IST8310_Info_Update(ist8310_real_data_t *ist8310_Info)
+bool IST8310_Info_Update(ist8310_real_data_t *info)
 {
-    ist8310_read_mag(ist8310_Info->raw_mag);
-    mag_calibration(ist8310_Info);
+    if (info == NULL)
+    {
+        return false;
+    }
+
+    uint8_t status_and_data[IST8310_STATUS_AND_DATA_LENGTH] = {0U};
+    const HAL_StatusTypeDef status = ist8310_IIC_read_regs(IST8310_STATUS_REG,
+                                                           status_and_data,
+                                                           IST8310_STATUS_AND_DATA_LENGTH);
+    info->last_hal_status = (uint8_t)status;
+    if (status != HAL_OK)
+    {
+        info->online = 0U;
+        info->data_ready = 0U;
+        return false;
+    }
+
+    info->online = 1U;
+    ist8310_read_over(status_and_data, info);
+    info->data_ready = (status_and_data[0] & 0x01U) ? 1U : 0U;
+    if (info->data_ready == 0U)
+    {
+        return false;
+    }
+
+    mag_calibration(info);
+    info->update_tick = HAL_GetTick();
+    return true;
 }

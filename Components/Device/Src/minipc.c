@@ -3,6 +3,10 @@
 #include <string.h>
 
 static MiniPC_ChassisCmd_Typedef chassis_cmd;
+static volatile uint8_t odom_reset_pending;
+static volatile uint8_t odom_reset_segment_id;
+static volatile uint8_t last_odom_reset_segment_id;
+static volatile uint8_t odom_reset_id_valid;
 
 static uint8_t MiniPC_FrameChecksum(const uint8_t *buf, uint8_t len)
 {
@@ -71,44 +75,96 @@ bool MiniPC_DecodeChassisCmdFrame(const uint8_t *buf, uint32_t len, MiniPC_Chass
 
 bool MiniPC_UpdateChassisCmdFromBuffer(const uint8_t *buf, uint32_t len)
 {
-    MiniPC_ChassisCmdFrame_Typedef frame;
-
-    if (!MiniPC_DecodeChassisCmdFrame(buf, len, &frame))
+    if (buf == NULL || len < 3U)
     {
         return false;
     }
 
-    chassis_cmd.vx = frame.vx;
-    chassis_cmd.wz = frame.wz;
-    chassis_cmd.update_tick = HAL_GetTick();
-    chassis_cmd.online = 1U;
+    if (buf[1] == MINIPC_ADDR_CHASSIS_CMD)
+    {
+        MiniPC_ChassisCmdFrame_Typedef frame;
+        if (!MiniPC_DecodeChassisCmdFrame(buf, len, &frame))
+        {
+            return false;
+        }
 
-    return true;
+        chassis_cmd.vx = frame.vx;
+        chassis_cmd.wz = frame.wz;
+        chassis_cmd.update_tick = HAL_GetTick();
+        chassis_cmd.online = 1U;
+        return true;
+    }
+
+    if (buf[1] == MINIPC_ADDR_ODOM_RESET)
+    {
+        if (len != MINIPC_ODOM_RESET_FRAME_LENGTH ||
+            buf[0] != MINIPC_FRAME_HEADER ||
+            buf[2] != MINIPC_ODOM_RESET_FRAME_LENGTH ||
+            buf[3] != MINIPC_ODOM_RESET_COMMAND ||
+            MiniPC_FrameChecksum(buf, MINIPC_ODOM_RESET_FRAME_LENGTH) != buf[MINIPC_ODOM_RESET_FRAME_LENGTH - 1U])
+        {
+            return false;
+        }
+
+        const uint8_t segment_id = buf[4];
+        if (odom_reset_id_valid == 0U || segment_id != last_odom_reset_segment_id)
+        {
+            last_odom_reset_segment_id = segment_id;
+            odom_reset_segment_id = segment_id;
+            odom_reset_pending = 1U;
+            odom_reset_id_valid = 1U;
+        }
+        return true;
+    }
+
+    return false;
 }
 
 bool MiniPC_UpdateChassisCmdFromStream(const uint8_t *buf, uint32_t len)
 {
-    if (buf == NULL || len < MINIPC_CHASSIS_CMD_FRAME_LENGTH)
+    if (buf == NULL || len < MINIPC_ODOM_RESET_FRAME_LENGTH)
     {
         return false;
     }
 
     bool updated = false;
-    for (uint32_t i = 0U; i <= len - MINIPC_CHASSIS_CMD_FRAME_LENGTH; i++)
+    uint32_t i = 0U;
+    while (i + 3U <= len)
     {
         if (buf[i] != MINIPC_FRAME_HEADER)
         {
+            i++;
             continue;
         }
 
-        if (MiniPC_UpdateChassisCmdFromBuffer(&buf[i], MINIPC_CHASSIS_CMD_FRAME_LENGTH))
+        const uint8_t frame_length = buf[i + 2U];
+        if (frame_length < MINIPC_ODOM_RESET_FRAME_LENGTH || i + frame_length > len)
         {
-            updated = true;
-            i += MINIPC_CHASSIS_CMD_FRAME_LENGTH - 1U;
+            i++;
+            continue;
         }
+
+        updated = MiniPC_UpdateChassisCmdFromBuffer(&buf[i], frame_length) || updated;
+        i += frame_length;
     }
 
     return updated;
+}
+
+bool MiniPC_TakeOdomResetRequest(uint8_t *segment_id)
+{
+    if (segment_id == NULL || odom_reset_pending == 0U)
+    {
+        return false;
+    }
+
+    const uint8_t requested_id = odom_reset_segment_id;
+    *segment_id = requested_id;
+    if (odom_reset_segment_id == requested_id)
+    {
+        odom_reset_pending = 0U;
+    }
+    return true;
 }
 
 const MiniPC_ChassisCmd_Typedef *MiniPC_GetChassisCmdPoint(void)
@@ -146,7 +202,8 @@ static void MiniPC_BuildChassisOdomFrame(uint8_t *tx_buf, const MiniPC_ChassisOd
     MiniPC_PackU16(&tx_buf[45], odom->right_mm);
     tx_buf[47] = odom->left_online;
     tx_buf[48] = odom->right_online;
-    tx_buf[49] = MiniPC_FrameChecksum(tx_buf, MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
+    tx_buf[49] = odom->segment_id;
+    tx_buf[50] = MiniPC_FrameChecksum(tx_buf, MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
 }
 
 bool MiniPC_SendChassisOdomUSB(const MiniPC_ChassisOdom_Typedef *odom)

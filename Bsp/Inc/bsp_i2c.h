@@ -21,6 +21,7 @@ void BSP_I2C_RecoverBus(I2C_HandleTypeDef *hi2c);
 
 extern uint8_t ist8310_IIC_read_single_reg(uint8_t reg);
 extern void ist8310_IIC_write_single_reg(uint8_t reg, uint8_t data);
+extern HAL_StatusTypeDef ist8310_IIC_read_regs(uint8_t reg, uint8_t *buf, uint8_t len);
 extern void ist8310_IIC_read_muli_reg(uint8_t reg, uint8_t *buf, uint8_t len);
 extern void ist8310_IIC_write_muli_reg(uint8_t reg, uint8_t *data, uint8_t len);
 extern void ist8310_RST_H(void); //复位IO 置高

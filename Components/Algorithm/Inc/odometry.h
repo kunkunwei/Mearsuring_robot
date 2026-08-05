@@ -63,6 +63,7 @@ typedef struct
 {
     float ds_m;
     float dtheta_rad;
+    float heading_rad;
     float vx_mps;
     float wz_rad_s;
     float slip_wz_rad_s;
@@ -81,6 +82,7 @@ typedef struct
     float last_pos_deg[4];
     float origin_pos_deg[4];
     float last_yaw_rad;
+    float heading_rad;
     uint8_t wheel_ready[4];
     uint8_t origin_ready[4];
     uint8_t yaw_ready;
@@ -88,6 +90,8 @@ typedef struct
 
 void OdomEstimator_Init(OdomEstimator_t *estimator, const OdomConfig_t *config);
 void OdomEstimator_Reset(OdomEstimator_t *estimator);
+void OdomEstimator_ResetDistanceOrigin(OdomEstimator_t *estimator);
+void OdomEstimator_SetHeading(OdomEstimator_t *estimator, float heading_rad);
 void OdomEstimator_Update(OdomEstimator_t *estimator, const OdomInput_t *input, OdomOutput_t *output);
 
 #endif

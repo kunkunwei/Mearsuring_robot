@@ -9,6 +9,7 @@ Release/
 *.map
 *.o
 *.obj
+*.exe
 *.d
 *.lst
 

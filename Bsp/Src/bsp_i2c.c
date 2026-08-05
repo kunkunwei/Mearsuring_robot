@@ -124,15 +124,8 @@ void BSP_I2C_RecoverBus(I2C_HandleTypeDef *hi2c)
   */
 uint8_t ist8310_IIC_read_single_reg(uint8_t reg)
 {
-    //static const uint16_t IIC_time = 2000;
-    uint8_t reg_data;
-    HAL_I2C_Mem_Read(&hi2c3, IST8310_IIC_ADDRESS << 1,
-        reg,
-        I2C_MEMADD_SIZE_8BIT,
-        &reg_data,
-        1,
-        1000);
-    // ist8310_delay_us(IIC_time);
+    uint8_t reg_data = 0U;
+    (void)BSP_I2C_MemRead(&hi2c3, IST8310_IIC_ADDRESS, reg, &reg_data, 1U, 2U);
     return reg_data;
 }
 /**
@@ -142,12 +135,12 @@ uint8_t ist8310_IIC_read_single_reg(uint8_t reg)
   */
 void ist8310_IIC_write_single_reg(uint8_t reg, uint8_t data)
 {
-    HAL_I2C_Mem_Write( &hi2c3, IST8310_IIC_ADDRESS << 1,
-        reg,
-        I2C_MEMADD_SIZE_8BIT,
-        &data,
-        1,
-        1000);
+    (void)BSP_I2C_MemWrite(&hi2c3, IST8310_IIC_ADDRESS, reg, &data, 1U, 2U);
+}
+
+HAL_StatusTypeDef ist8310_IIC_read_regs(uint8_t reg, uint8_t *buf, uint8_t len)
+{
+    return BSP_I2C_MemRead(&hi2c3, IST8310_IIC_ADDRESS, reg, buf, len, 2U);
 }
 /**
   * @brief          通过I2C读取IST8310的多个字节
@@ -158,13 +151,7 @@ void ist8310_IIC_write_single_reg(uint8_t reg, uint8_t data)
   */
 void ist8310_IIC_read_muli_reg(uint8_t reg, uint8_t *buf, uint8_t len)
 {
-    while (len)
-    {
-        (*buf) = ist8310_IIC_read_single_reg(reg);
-        reg++;
-        buf++;
-        len--;
-    }
+    (void)ist8310_IIC_read_regs(reg, buf, len);
 }
 /**
   * @brief          通过I2C写入多个字节到IST8310的寄存器中

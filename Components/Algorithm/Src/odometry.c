@@ -308,12 +308,33 @@ void OdomEstimator_Reset(OdomEstimator_t *estimator)
         return;
     }
 
+    OdomEstimator_ResetDistanceOrigin(estimator);
+    estimator->last_yaw_rad = 0.0f;
+    estimator->heading_rad = 0.0f;
+    estimator->yaw_ready = 0U;
+}
+
+void OdomEstimator_ResetDistanceOrigin(OdomEstimator_t *estimator)
+{
+    if (estimator == NULL)
+    {
+        return;
+    }
+
     memset(estimator->last_pos_deg, 0, sizeof(estimator->last_pos_deg));
     memset(estimator->origin_pos_deg, 0, sizeof(estimator->origin_pos_deg));
     memset(estimator->wheel_ready, 0, sizeof(estimator->wheel_ready));
     memset(estimator->origin_ready, 0, sizeof(estimator->origin_ready));
-    estimator->last_yaw_rad = 0.0f;
-    estimator->yaw_ready = 0U;
+}
+
+void OdomEstimator_SetHeading(OdomEstimator_t *estimator, float heading_rad)
+{
+    if (estimator == NULL || !isfinite(heading_rad))
+    {
+        return;
+    }
+
+    estimator->heading_rad = odom_wrap_pi(heading_rad);
 }
 
 void OdomEstimator_Update(OdomEstimator_t *estimator, const OdomInput_t *input, OdomOutput_t *output)
@@ -437,5 +458,7 @@ void OdomEstimator_Update(OdomEstimator_t *estimator, const OdomInput_t *input, 
 
     output->vx_mps = output->ds_m / input->dt_s;
     output->wz_rad_s = output->dtheta_rad / input->dt_s;
+    estimator->heading_rad = odom_wrap_pi(estimator->heading_rad + output->dtheta_rad);
+    output->heading_rad = estimator->heading_rad;
     output->valid = 1U;
 }

@@ -52,7 +52,7 @@ typedef struct
     uint16_t last_ecd;       //上次转子机械角度 (0-8191)，用于计算位置变化量
     uint16_t ecd;          // 编码器位置原始值(0-8191)
     int16_t rpm;           // 转速原始值(rpm)
-    int16_t current;       // 电流原始值(mA)
+    int16_t current;       // DJI raw current; VESC Status1 current in 0.1 A.
     uint8_t temp;          // 温度(°C)
     int32_t erpm;          // VESC electrical RPM
     int32_t tachometer;    // VESC tachometer
@@ -74,6 +74,7 @@ void get_dji_motor_measure(dji_motor_measure_t* ptr, uint8_t *rx_message);
 void get_chassis_motor_measure(dji_motor_measure_t* ptr, uint8_t *rx_message);
 void get_vesc_motor_measure(const CAN_RxHeaderTypeDef *header, uint8_t *rx_message);
 void VESC_Chassis_SetCurrent(uint8_t vesc_id, float current_a);
+void VESC_Chassis_SetMechanicalRpm(uint8_t vesc_id, float mechanical_rpm);
 bool vesc_motor_status_is_online(const dji_motor_measure_t *motor, uint32_t timeout_ms);
 bool vesc_motor_status4_is_online(const dji_motor_measure_t *motor, uint32_t timeout_ms);
 

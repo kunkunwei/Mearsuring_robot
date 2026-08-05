@@ -33,6 +33,8 @@ void Bsp_Tim_Init(void)
 {
 	//Heat_Power_Tim Start
 	HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
+	HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+	buzzer_off();
 }
 //------------------------------------------------------------------------------
 
@@ -45,11 +47,28 @@ void Heat_Power_Control(uint16_t compare)
 {
     User_Tim_SetCompare(&htim10,TIM_CHANNEL_1,compare);
 }
-void buzzer_on(uint16_t psc,uint16_t compare)
+void Buzzer_SetFrequency(uint32_t frequency_hz)
 {
-  TIM4->PSC = psc;
-  User_Tim_SetCompare(&htim4,TIM_CHANNEL_3,compare);
+  if (frequency_hz == 0U)
+  {
+    buzzer_off();
+    return;
+  }
 
+  uint32_t period_count = 1000000U / frequency_hz;
+  if (period_count < 2U)
+  {
+    period_count = 2U;
+  }
+  else if (period_count > 65536U)
+  {
+    period_count = 65536U;
+  }
+
+  __HAL_TIM_SET_PRESCALER(&htim4, 83U);
+  __HAL_TIM_SET_AUTORELOAD(&htim4, period_count - 1U);
+  __HAL_TIM_SET_COUNTER(&htim4, 0U);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, period_count / 2U);
 }
 void buzzer_off(void)
 {
@@ -94,5 +113,4 @@ static void User_Tim_SetCompare(TIM_HandleTypeDef *htim,uint32_t Channel,uint16_
   }
 }
 //------------------------------------------------------------------------------
-
 

@@ -98,10 +98,10 @@
 //////////////////////////////////////////////////////////
 
 //底盘电机速度环PID
-#define M3505_MOTOR_SPEED_PID_KP 25.5f
-#define M3505_MOTOR_SPEED_PID_KI 15.5f
+#define M3505_MOTOR_SPEED_PID_KP 10.5f
+#define M3505_MOTOR_SPEED_PID_KI 10.5f
 #define M3505_MOTOR_SPEED_PID_KD 700.0f
-#define M3505_MOTOR_SPEED_PID_MAX_OUT 10000.0f	//16000.0f
+#define M3505_MOTOR_SPEED_PID_MAX_OUT 6000.0f	//16000.0f
 #define M3505_MOTOR_SPEED_PID_MAX_IOUT 500.0f
 
 //底盘旋转跟随PID
@@ -128,6 +128,8 @@
 #define CHASSIS_HOLD_DAMP_CURRENT_PER_RPM 8.0f
 #define CHASSIS_HOLD_STATIC_CURRENT 2500.0f
 #define CHASSIS_HOLD_MAX_CURRENT 8000.0f
+#define CHASSIS_HOLD_COMMAND_VX_DEADBAND 0.001f
+#define CHASSIS_HOLD_COMMAND_WZ_DEADBAND 0.001f
 
 //////////////////////////////////////////////////////////
 
@@ -212,6 +214,7 @@ typedef struct
 	Chassis_Pid_t chassis_pid;
 	Chassis_set_t state_set;
 	Chassis_ref_t state_ref;
+	uint8_t auto_hold_active;
 } chassis_move_t;
 
 //
