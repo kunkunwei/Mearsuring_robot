@@ -194,16 +194,18 @@ static void MiniPC_BuildChassisOdomFrame(uint8_t *tx_buf, const MiniPC_ChassisOd
     MiniPC_PackFloat(&tx_buf[15], odom->distance);
     MiniPC_PackFloat(&tx_buf[19], odom->vx);
     MiniPC_PackFloat(&tx_buf[23], odom->wz);
-    MiniPC_PackFloat(&tx_buf[27], odom->motor_pos_deg[0]);
-    MiniPC_PackFloat(&tx_buf[31], odom->motor_pos_deg[1]);
-    MiniPC_PackFloat(&tx_buf[35], odom->motor_pos_deg[2]);
-    MiniPC_PackFloat(&tx_buf[39], odom->motor_pos_deg[3]);
-    MiniPC_PackU16(&tx_buf[43], odom->left_mm);
-    MiniPC_PackU16(&tx_buf[45], odom->right_mm);
-    tx_buf[47] = odom->left_online;
-    tx_buf[48] = odom->right_online;
-    tx_buf[49] = odom->segment_id;
-    tx_buf[50] = MiniPC_FrameChecksum(tx_buf, MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
+    MiniPC_PackFloat(&tx_buf[27], odom->pitch_rad);
+    MiniPC_PackFloat(&tx_buf[31], odom->roll_rad);
+    MiniPC_PackFloat(&tx_buf[35], odom->motor_pos_deg[0]);
+    MiniPC_PackFloat(&tx_buf[39], odom->motor_pos_deg[1]);
+    MiniPC_PackFloat(&tx_buf[43], odom->motor_pos_deg[2]);
+    MiniPC_PackFloat(&tx_buf[47], odom->motor_pos_deg[3]);
+    MiniPC_PackU16(&tx_buf[51], odom->left_mm);
+    MiniPC_PackU16(&tx_buf[53], odom->right_mm);
+    tx_buf[55] = odom->left_online;
+    tx_buf[56] = odom->right_online;
+    tx_buf[57] = odom->segment_id;
+    tx_buf[58] = MiniPC_FrameChecksum(tx_buf, MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
 }
 
 bool MiniPC_SendChassisOdomUSB(const MiniPC_ChassisOdom_Typedef *odom)

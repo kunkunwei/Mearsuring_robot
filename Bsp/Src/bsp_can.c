@@ -51,7 +51,17 @@ static BSP_CAN_TxQueueItem_t s_can_tx_queue[BSP_CAN_TX_QUEUE_SIZE];
 static volatile uint8_t s_can_tx_queue_head = 0U;
 static volatile uint8_t s_can_tx_queue_tail = 0U;
 static volatile uint32_t s_can_tx_queue_dropped = 0U;
+static volatile uint8_t s_can_tx_queue_high_watermark = 0U;
 static volatile uint8_t s_can_tx_queue_pumping = 0U;
+
+static uint8_t BSP_CAN_TxQueueDepth(void)
+{
+  if (s_can_tx_queue_head >= s_can_tx_queue_tail)
+  {
+    return (uint8_t)(s_can_tx_queue_head - s_can_tx_queue_tail);
+  }
+  return (uint8_t)(BSP_CAN_TX_QUEUE_SIZE - s_can_tx_queue_tail + s_can_tx_queue_head);
+}
 
 static void BSP_CAN_TxQueuePush(const CAN_TxFrameTypeDef *frame)
 {
@@ -72,6 +82,11 @@ static void BSP_CAN_TxQueuePush(const CAN_TxFrameTypeDef *frame)
   }
 
   s_can_tx_queue_head = next_head;
+  const uint8_t queue_depth = BSP_CAN_TxQueueDepth();
+  if (queue_depth > s_can_tx_queue_high_watermark)
+  {
+    s_can_tx_queue_high_watermark = queue_depth;
+  }
   __enable_irq();
 }
 
@@ -339,6 +354,16 @@ void USER_CAN_TxMessage(CAN_TxFrameTypeDef *TxHeader)
 
   BSP_CAN_TxQueuePush(TxHeader);
   BSP_CAN_TxQueuePump();
+}
+
+uint32_t BSP_CAN_GetTxQueueDropped(void)
+{
+  return s_can_tx_queue_dropped;
+}
+
+uint8_t BSP_CAN_GetTxQueueHighWatermark(void)
+{
+  return s_can_tx_queue_high_watermark;
 }
 
 void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef *hcan)

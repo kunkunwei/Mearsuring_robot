@@ -58,6 +58,16 @@ void Chassis_Hold_Capture(Chassis_Hold_State_t *state,
     state->initialized = 1U;
 }
 
+float Chassis_Hold_CorrectPitch(const Chassis_Hold_Config_t *config,
+                                float raw_pitch_rad)
+{
+    if (config == NULL)
+    {
+        return raw_pitch_rad;
+    }
+    return raw_pitch_rad - config->pitch_zero_offset_rad;
+}
+
 float Chassis_Hold_Update(Chassis_Hold_State_t *state,
                           const Chassis_Hold_Config_t *config,
                           const Chassis_Hold_Input_t *input,
@@ -79,7 +89,8 @@ float Chassis_Hold_Update(Chassis_Hold_State_t *state,
     output->position_current_a = config->position_kp_a_per_deg *
                                  (state->position_ref_deg - output->mean_position_deg);
     output->speed_current_a = -config->speed_kd_a_per_rpm * output->mean_speed_rpm;
-    output->pitch_current_a = config->pitch_feedforward_a * sinf(input->pitch_rad);
+    output->corrected_pitch_rad = Chassis_Hold_CorrectPitch(config, input->pitch_rad);
+    output->pitch_current_a = config->pitch_feedforward_a * sinf(output->corrected_pitch_rad);
     output->raw_current_a = hold_limit(output->position_current_a +
                                        output->speed_current_a +
                                        output->pitch_current_a,

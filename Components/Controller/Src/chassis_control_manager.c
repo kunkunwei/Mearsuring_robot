@@ -40,6 +40,26 @@ static float control_slew(float target, float current, float max_step)
     return current + control_limit(target - current, -max_step, max_step);
 }
 
+static float control_slew_asymmetric(float target,
+                                     float current,
+                                     float rise_step,
+                                     float release_step)
+{
+    const int8_t target_sign = control_sign(target);
+    const int8_t current_sign = control_sign(current);
+
+    if (target_sign != 0 && current_sign != 0 && target_sign != current_sign)
+    {
+        return control_slew(0.0f, current, release_step);
+    }
+
+    const uint8_t increasing_magnitude =
+        (target_sign != 0) &&
+        (current_sign == 0 || control_abs(target) > control_abs(current));
+    const float max_step = increasing_magnitude ? rise_step : release_step;
+    return control_slew(target, current, max_step);
+}
+
 static void control_clear_output(Chassis_Control_Output_t *output,
                                  Chassis_Control_State_e state,
                                  Chassis_Control_Fault_e fault)
@@ -74,18 +94,47 @@ static uint8_t control_command_active(const Chassis_Control_Manager_t *manager,
     return 0U;
 }
 
-static float control_max_abs_speed(const Chassis_Control_Input_t *input)
+static uint8_t control_is_pure_turn(const Chassis_Control_Manager_t *manager,
+                                    const Chassis_Control_Input_t *input)
 {
-    float max_speed = 0.0f;
+    const float left_target_rpm = 0.5f * (input->target_rpm[0] + input->target_rpm[3]);
+    const float right_target_rpm = 0.5f * (input->target_rpm[1] + input->target_rpm[2]);
+    const float longitudinal_target_rpm = 0.5f * (left_target_rpm + right_target_rpm);
+    const float turn_target_rpm = 0.5f * (right_target_rpm - left_target_rpm);
+
+    return (control_abs(longitudinal_target_rpm) <= manager->config.command_deadband_rpm &&
+            control_abs(turn_target_rpm) > manager->config.command_deadband_rpm) ? 1U : 0U;
+}
+
+static float control_pitch_feedforward(const Chassis_Control_Manager_t *manager,
+                                       float raw_pitch_rad)
+{
+    const float corrected_pitch_rad = Chassis_Hold_CorrectPitch(&manager->config.hold,
+                                                                 raw_pitch_rad);
+    return manager->config.hold.pitch_feedforward_a * sinf(corrected_pitch_rad);
+}
+
+static float control_robust_abs_speed(const Chassis_Control_Input_t *input)
+{
+    float speed[CHASSIS_CONTROL_MOTOR_COUNT];
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
-        const float speed = control_abs(input->speed_rpm[i]);
-        if (speed > max_speed)
-        {
-            max_speed = speed;
-        }
+        speed[i] = control_abs(input->speed_rpm[i]);
     }
-    return max_speed;
+
+    for (uint8_t i = 1U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        const float value = speed[i];
+        uint8_t j = i;
+        while (j > 0U && speed[j - 1U] > value)
+        {
+            speed[j] = speed[j - 1U];
+            j--;
+        }
+        speed[j] = value;
+    }
+
+    return 0.5f * (speed[1] + speed[2]);
 }
 
 static void control_enter_drive(Chassis_Control_Manager_t *manager,
@@ -100,18 +149,57 @@ static void control_enter_drive(Chassis_Control_Manager_t *manager,
     }
 }
 
-static void control_enter_brake(Chassis_Control_Manager_t *manager)
+static float control_brake_position_comp_scale(const Chassis_Control_Manager_t *manager,
+                                               float raw_pitch_rad)
+{
+    const float pitch_rad = control_abs(Chassis_Hold_CorrectPitch(&manager->config.hold,
+                                                                  raw_pitch_rad));
+    const float off_pitch = manager->config.brake_position_comp_off_pitch_rad;
+    const float full_pitch = manager->config.brake_position_comp_full_pitch_rad;
+
+    if (pitch_rad <= off_pitch)
+    {
+        return 0.0f;
+    }
+    if (pitch_rad >= full_pitch || full_pitch <= off_pitch)
+    {
+        return 1.0f;
+    }
+    return (pitch_rad - off_pitch) / (full_pitch - off_pitch);
+}
+
+static void control_enter_brake(Chassis_Control_Manager_t *manager,
+                                const Chassis_Control_Input_t *input)
 {
     manager->state = CHASSIS_CTRL_BRAKE;
     manager->hold_still_time_s = 0.0f;
-    Chassis_Hold_Reset(&manager->hold_state);
+    manager->brake_position_comp_scale = control_brake_position_comp_scale(manager,
+                                                                            input->pitch_rad);
+    Chassis_Hold_Capture(&manager->hold_state, input->position_deg);
+    for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        manager->hold_wheel_position_ref_deg[i] = input->position_deg[i];
+    }
 }
 
 static void control_enter_hold(Chassis_Control_Manager_t *manager,
                                const Chassis_Control_Input_t *input)
 {
+    Chassis_Hold_State_t stop_state;
+    Chassis_Hold_Reset(&stop_state);
+    Chassis_Hold_Capture(&stop_state, input->position_deg);
+
+    manager->hold_state.position_ref_deg =
+        manager->brake_position_comp_scale * manager->hold_state.position_ref_deg +
+        (1.0f - manager->brake_position_comp_scale) * stop_state.position_ref_deg;
+    for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        manager->hold_wheel_position_ref_deg[i] =
+            manager->brake_position_comp_scale * manager->hold_wheel_position_ref_deg[i] +
+            (1.0f - manager->brake_position_comp_scale) * input->position_deg[i];
+    }
+    manager->hold_state.initialized = 1U;
     manager->state = CHASSIS_CTRL_HOLD;
-    Chassis_Hold_Capture(&manager->hold_state, input->position_deg);
 }
 
 static void control_latch_fault(Chassis_Control_Manager_t *manager,
@@ -133,29 +221,40 @@ void Chassis_ControlManager_DefaultConfig(Chassis_Control_Config_t *config)
 
     *config = (Chassis_Control_Config_t){
         .drive = {
-            .position_kp_a_per_deg = 0.0105f,
-            .speed_kd_a_per_rpm = 0.0105f,
-            .friction_current_a = 0.25f,
-            .friction_rpm_scale = 30.0f,
+            .position_kp_a_per_deg = 0.0050f,
+            .speed_kd_a_per_rpm = 0.008f,
+            .speed_ki_a_per_rpm_s = 0.01f,
+            .speed_integral_limit_a = 1.0f,
+            .friction_current_a = 1.00f,
+            .friction_rpm_scale = 100.0f,
             .position_error_limit_deg = 5.0f,
-            .current_limit_a = 0.5f,
+            .current_limit_a = 3.5f,
         },
         .brake = {
             .speed_gain_a_per_rpm = 0.010f,
-            .current_limit_a = 0.5f,
+            .current_limit_a = 3.0f,
         },
         .hold = {
             .position_kp_a_per_deg = 0.010f,
             .speed_kd_a_per_rpm = 0.010f,
-            .pitch_feedforward_a = 0.0f,
-            .current_limit_a = 0.5f,
+            .pitch_feedforward_a = -8.0f,
+            .pitch_zero_offset_rad = 3.7f / 57.29577951308232f,
+            .current_limit_a = 6.5f,
         },
+        .brake_position_comp_off_pitch_rad = 3.0f / 57.29577951308232f,
+        .brake_position_comp_full_pitch_rad = 5.0f / 57.29577951308232f,
         .command_deadband_rpm = 3.0f,
+        .turn_breakaway_current_a = 2.50f,
+        .turn_breakaway_target_rpm = 30.0f,
+        .turn_breakaway_speed_rpm = 80.0f,
         .hold_enter_speed_rpm = 5.0f,
-        .hold_enter_time_s = 0.200f,
-        .current_slew_a_per_s = 10.0f,
-        .hold_overspeed_rpm = 50.0f,
+        .hold_enter_time_s = 0.100f,
+        .current_rise_a_per_s = 30.0f,
+        .current_release_a_per_s = 60.0f,
+        .hold_overspeed_rpm = 200.0f,
+        .hold_overspeed_time_s = 0.500f,
         .oscillation_window_s = 0.100f,
+        .oscillation_min_current_a = 0.30f,
         .oscillation_reversal_limit = 4U,
         .saturation_time_s = 0.100f,
         .dt_min_s = 0.003f,
@@ -221,6 +320,9 @@ static void control_compute_drive(Chassis_Control_Manager_t *manager,
                                   float dt_s,
                                   Chassis_Control_Output_t *output)
 {
+    const uint8_t pure_turn = control_is_pure_turn(manager, input);
+    const float pitch_current_a = control_pitch_feedforward(manager, input->pitch_rad);
+
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
         const Chassis_Mit_Input_t motor_input = {
@@ -229,28 +331,82 @@ static void control_compute_drive(Chassis_Control_Manager_t *manager,
             .position_deg = input->position_deg[i],
         };
         Chassis_Mit_Output_t motor_output;
-        output->raw_current_a[i] = Chassis_Mit_Update(&manager->drive_state[i],
-                                                       &manager->config.drive,
-                                                       &motor_input,
-                                                       dt_s,
-                                                       &motor_output);
+        float drive_current_a = Chassis_Mit_Update(&manager->drive_state[i],
+                                                    &manager->config.drive,
+                                                    &motor_input,
+                                                    dt_s,
+                                                    &motor_output);
+        if (pure_turn != 0U &&
+            manager->config.turn_breakaway_current_a > 0.0f &&
+            manager->config.turn_breakaway_target_rpm > 0.0f &&
+            manager->config.turn_breakaway_speed_rpm > 0.0f)
+        {
+            const float target_scale = control_limit(
+                control_abs(input->target_rpm[i]) / manager->config.turn_breakaway_target_rpm,
+                0.0f,
+                1.0f);
+            const float speed_scale = 1.0f - control_limit(
+                control_abs(input->speed_rpm[i]) / manager->config.turn_breakaway_speed_rpm,
+                0.0f,
+                1.0f);
+            const float full_friction_current_a =
+                (float)control_sign(input->target_rpm[i]) *
+                manager->config.turn_breakaway_current_a;
+            const float friction_correction_a =
+                (full_friction_current_a - motor_output.friction_current_a) *
+                target_scale * speed_scale;
+            drive_current_a += friction_correction_a;
+            motor_output.friction_current_a += friction_correction_a;
+        }
+
+        output->raw_current_a[i] = control_limit(drive_current_a + pitch_current_a,
+                                                 -manager->config.drive.current_limit_a,
+                                                 manager->config.drive.current_limit_a);
         output->position_current_a[i] = motor_output.position_current_a;
         output->speed_current_a[i] = motor_output.speed_current_a;
-        output->feedforward_current_a[i] = motor_output.friction_current_a;
+        output->feedforward_current_a[i] = motor_output.friction_current_a + pitch_current_a;
     }
+}
+
+static void control_build_hold_input(const Chassis_Control_Input_t *input,
+                                     Chassis_Hold_Input_t *hold_input)
+{
+    for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        hold_input->position_deg[i] = input->position_deg[i];
+        hold_input->speed_rpm[i] = input->speed_rpm[i];
+    }
+    hold_input->pitch_rad = input->pitch_rad;
 }
 
 static void control_compute_brake(Chassis_Control_Manager_t *manager,
                                   const Chassis_Control_Input_t *input,
                                   Chassis_Control_Output_t *output)
 {
+    Chassis_Hold_Input_t hold_input;
+    Chassis_Hold_Output_t hold_output;
+    control_build_hold_input(input, &hold_input);
+    Chassis_Hold_Update(&manager->hold_state,
+                        &manager->config.hold,
+                        &hold_input,
+                        &hold_output);
+    const float position_current_a = hold_output.position_current_a *
+                                     manager->brake_position_comp_scale;
+
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
         Chassis_Brake_Output_t motor_output;
-        output->raw_current_a[i] = Chassis_Brake_Update(&manager->config.brake,
-                                                        input->speed_rpm[i],
-                                                        &motor_output);
+        const float speed_current_a = Chassis_Brake_Update(&manager->config.brake,
+                                                            input->speed_rpm[i],
+                                                            &motor_output);
+        output->position_current_a[i] = position_current_a;
         output->speed_current_a[i] = motor_output.speed_current_a;
+        output->feedforward_current_a[i] = hold_output.pitch_current_a;
+        output->raw_current_a[i] = control_limit(position_current_a +
+                                                 speed_current_a +
+                                                 hold_output.pitch_current_a,
+                                                 -manager->config.brake.current_limit_a,
+                                                 manager->config.brake.current_limit_a);
     }
 }
 
@@ -258,23 +414,28 @@ static void control_compute_hold(Chassis_Control_Manager_t *manager,
                                  const Chassis_Control_Input_t *input,
                                  Chassis_Control_Output_t *output)
 {
-    Chassis_Hold_Input_t hold_input = {.pitch_rad = input->pitch_rad};
-    for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
-    {
-        hold_input.position_deg[i] = input->position_deg[i];
-        hold_input.speed_rpm[i] = input->speed_rpm[i];
-    }
+    Chassis_Hold_Input_t hold_input;
+    control_build_hold_input(input, &hold_input);
 
     Chassis_Hold_Output_t hold_output;
-    const float current_a = Chassis_Hold_Update(&manager->hold_state,
-                                                 &manager->config.hold,
-                                                 &hold_input,
-                                                 &hold_output);
+    Chassis_Hold_Update(&manager->hold_state,
+                        &manager->config.hold,
+                        &hold_input,
+                        &hold_output);
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
-        output->raw_current_a[i] = current_a;
-        output->position_current_a[i] = hold_output.position_current_a;
-        output->speed_current_a[i] = hold_output.speed_current_a;
+        const float position_current_a = manager->config.hold.position_kp_a_per_deg *
+                                         (manager->hold_wheel_position_ref_deg[i] -
+                                          input->position_deg[i]);
+        const float speed_current_a = -manager->config.hold.speed_kd_a_per_rpm *
+                                      input->speed_rpm[i];
+        output->raw_current_a[i] = control_limit(position_current_a +
+                                                 speed_current_a +
+                                                 hold_output.pitch_current_a,
+                                                 -manager->config.hold.current_limit_a,
+                                                 manager->config.hold.current_limit_a);
+        output->position_current_a[i] = position_current_a;
+        output->speed_current_a[i] = speed_current_a;
         output->feedforward_current_a[i] = hold_output.pitch_current_a;
     }
 }
@@ -283,12 +444,14 @@ static void control_apply_slew(Chassis_Control_Manager_t *manager,
                                float dt_s,
                                Chassis_Control_Output_t *output)
 {
-    const float max_step = manager->config.current_slew_a_per_s * dt_s;
+    const float rise_step = manager->config.current_rise_a_per_s * dt_s;
+    const float release_step = manager->config.current_release_a_per_s * dt_s;
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
-        manager->last_current_a[i] = control_slew(output->raw_current_a[i],
-                                                  manager->last_current_a[i],
-                                                  max_step);
+        manager->last_current_a[i] = control_slew_asymmetric(output->raw_current_a[i],
+                                                             manager->last_current_a[i],
+                                                             rise_step,
+                                                             release_step);
         output->current_a[i] = manager->last_current_a[i];
     }
 }
@@ -306,7 +469,9 @@ static uint8_t control_detect_reversal(Chassis_Control_Manager_t *manager,
 
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
-        const int8_t sign = control_sign(output->current_a[i]);
+        const int8_t sign = (control_abs(output->current_a[i]) >=
+                             manager->config.oscillation_min_current_a) ?
+                            control_sign(output->current_a[i]) : 0;
         if (sign != 0 && manager->last_current_sign[i] != 0 && sign != manager->last_current_sign[i])
         {
             manager->reversal_count[i]++;
@@ -333,7 +498,10 @@ static uint8_t control_detect_saturation(Chassis_Control_Manager_t *manager,
     uint8_t saturated = 0U;
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
-        if (control_abs(output->raw_current_a[i]) >= limit - 0.001f)
+        const float monitored_current = (manager->state == CHASSIS_CTRL_HOLD) ?
+                                        output->position_current_a[i] + output->speed_current_a[i] :
+                                        output->raw_current_a[i];
+        if (control_abs(monitored_current) >= limit - 0.001f)
         {
             saturated = 1U;
             break;
@@ -344,6 +512,22 @@ static uint8_t control_detect_saturation(Chassis_Control_Manager_t *manager,
                                     manager->saturation_elapsed_s + dt_s :
                                     0.0f;
     return (manager->saturation_elapsed_s >= manager->config.saturation_time_s) ? 1U : 0U;
+}
+
+static uint8_t control_detect_hold_overspeed(Chassis_Control_Manager_t *manager,
+                                             const Chassis_Control_Input_t *input,
+                                             uint8_t command_active,
+                                             float dt_s)
+{
+    if (command_active != 0U || manager->state != CHASSIS_CTRL_HOLD ||
+        control_robust_abs_speed(input) <= manager->config.hold_overspeed_rpm)
+    {
+        manager->hold_overspeed_elapsed_s = 0.0f;
+        return 0U;
+    }
+
+    manager->hold_overspeed_elapsed_s += dt_s;
+    return (manager->hold_overspeed_elapsed_s >= manager->config.hold_overspeed_time_s) ? 1U : 0U;
 }
 
 void Chassis_ControlManager_Update(Chassis_Control_Manager_t *manager,
@@ -389,8 +573,7 @@ void Chassis_ControlManager_Update(Chassis_Control_Manager_t *manager,
     }
 
     const uint8_t command_active = control_command_active(manager, input);
-    if (command_active == 0U && manager->state == CHASSIS_CTRL_HOLD &&
-        control_max_abs_speed(input) > manager->config.hold_overspeed_rpm)
+    if (control_detect_hold_overspeed(manager, input, command_active, dt_s) != 0U)
     {
         control_latch_fault(manager, CHASSIS_CTRL_FAULT_OVERSPEED, output);
         return;
@@ -405,12 +588,12 @@ void Chassis_ControlManager_Update(Chassis_Control_Manager_t *manager,
     }
     else if (manager->state == CHASSIS_CTRL_DRIVE || manager->state == CHASSIS_CTRL_DISABLED)
     {
-        control_enter_brake(manager);
+        control_enter_brake(manager, input);
     }
 
     if (manager->state == CHASSIS_CTRL_BRAKE)
     {
-        if (control_max_abs_speed(input) <= manager->config.hold_enter_speed_rpm)
+        if (control_robust_abs_speed(input) <= manager->config.hold_enter_speed_rpm)
         {
             manager->hold_still_time_s += dt_s;
             if (manager->hold_still_time_s >= manager->config.hold_enter_time_s - 1.0e-6f)
@@ -441,19 +624,24 @@ void Chassis_ControlManager_Update(Chassis_Control_Manager_t *manager,
     control_apply_slew(manager, dt_s, output);
     if (command_active == 0U)
     {
-        if (control_detect_reversal(manager, dt_s, output) != 0U)
+        if (manager->state == CHASSIS_CTRL_HOLD)
         {
-            control_latch_fault(manager, CHASSIS_CTRL_FAULT_OSCILLATION, output);
-            return;
+            if (control_detect_reversal(manager, dt_s, output) != 0U)
+            {
+                control_latch_fault(manager, CHASSIS_CTRL_FAULT_OSCILLATION, output);
+                return;
+            }
+            if (control_detect_saturation(manager, dt_s, output) != 0U)
+            {
+                control_latch_fault(manager, CHASSIS_CTRL_FAULT_SATURATION, output);
+            }
         }
-        if (manager->state == CHASSIS_CTRL_HOLD &&
-            control_detect_saturation(manager, dt_s, output) != 0U)
+        else
         {
-            control_latch_fault(manager, CHASSIS_CTRL_FAULT_SATURATION, output);
-        }
-        else if (manager->state != CHASSIS_CTRL_HOLD)
-        {
+            manager->reversal_window_elapsed_s = 0.0f;
             manager->saturation_elapsed_s = 0.0f;
+            memset(manager->reversal_count, 0, sizeof(manager->reversal_count));
+            memset(manager->last_current_sign, 0, sizeof(manager->last_current_sign));
         }
     }
     else

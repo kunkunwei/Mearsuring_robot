@@ -94,15 +94,11 @@
 //底盘电机最大速度
 #define MAX_WHEEL_SPEED 3.6f
 //底盘运动过程最大前进速度
-#define NORMAL_MAX_CHASSIS_SPEED_X 2.0f
+#define NORMAL_MAX_CHASSIS_SPEED_X 0.5f
 #define NORMAL_MAX_CHASSIS_SPEED_WZ 15.0f
 
 //////////////////////////////////////////////////////////
 
-// Minimum wheel speed used only for commanded in-place turns.
-#define CHASSIS_TURN_MIN_RPM 120.0f
-#define CHASSIS_TURN_MIN_VX_THRESHOLD 0.03f
-#define CHASSIS_TURN_MIN_WZ_THRESHOLD 0.10f
 #define CHASSIS_MOTOR_STATUS1_TIMEOUT_MS 20U
 #define CHASSIS_MOTOR_STATUS4_TIMEOUT_MS 50U
 

@@ -7,6 +7,8 @@ typedef struct
 {
     float position_kp_a_per_deg;
     float speed_kd_a_per_rpm;
+    float speed_ki_a_per_rpm_s;
+    float speed_integral_limit_a;
     float friction_current_a;
     float friction_rpm_scale;
     float position_error_limit_deg;
@@ -16,6 +18,8 @@ typedef struct
 typedef struct
 {
     float position_ref_deg;
+    float speed_integral_current_a;
+    float last_target_rpm;
     uint8_t initialized;
 } Chassis_Mit_State_t;
 
@@ -31,6 +35,7 @@ typedef struct
     float position_error_deg;
     float position_current_a;
     float speed_current_a;
+    float speed_integral_current_a;
     float friction_current_a;
     float raw_current_a;
 } Chassis_Mit_Output_t;

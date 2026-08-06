@@ -32,6 +32,8 @@ HAL_StatusTypeDef Vofa_Send_Odom_Info(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef Vofa_Send_Odom_Debug_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Motor_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Speed_Control_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
+HAL_StatusTypeDef Vofa_Send_ChassisPipeline_Debug(UART_HandleTypeDef *huart,
+                                                   const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Brake_Debug_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Ultrasonic_Info(UART_HandleTypeDef *huart,
                                             const UltrasonicI2C_t *left,

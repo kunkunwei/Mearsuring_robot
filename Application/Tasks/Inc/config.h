@@ -85,8 +85,10 @@
 
 /**
  * @brief the index of pitch angle update
+ * @note  INS_Info.angle 已转换为车体系角度 [yaw, pitch, roll]，
+ *        与 Chassis_Task.h 的 INS_YAW/PITCH/ROLL_ADDRESS_OFFSET 一致。
  */
-#define IMU_ANGLE_INDEX_PITCH 2U
+#define IMU_ANGLE_INDEX_PITCH 1U
 /**
  * @brief the index of yaw angle update
  */
@@ -94,7 +96,7 @@
 /**
  * @brief the index of roll angle update
  */
-#define IMU_ANGLE_INDEX_ROLL 1U
+#define IMU_ANGLE_INDEX_ROLL 2U
 
 /**
  * @brief the index of pitch gyro update

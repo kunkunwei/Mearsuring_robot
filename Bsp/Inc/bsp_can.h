@@ -82,6 +82,8 @@ extern void BSP_CAN_Init(void);
   * @brief  USER function to transmit the Specifies message.
   */
 extern void USER_CAN_TxMessage(CAN_TxFrameTypeDef *TxHeader);
+uint32_t BSP_CAN_GetTxQueueDropped(void);
+uint8_t BSP_CAN_GetTxQueueHighWatermark(void);
 /**
   * @brief  Register CAN1 receive callback (called in CAN1 Rx FIFO0 ISR).
   */

@@ -3,6 +3,7 @@
 //
 
 #include "../Inc/vofa.h"
+#include "bsp_can.h"
 #include "observe_task.h"
 #include "mymotor.h"
 #include <stdio.h>
@@ -10,6 +11,13 @@
 #include <string.h>
 
 #define VOFA_RAD_TO_DEG 57.29577951308232f
+#define VOFA_CHASSIS_PIPELINE_CHANNELS 20U
+
+typedef struct
+{
+    float data[VOFA_CHASSIS_PIPELINE_CHANNELS];
+    uint8_t tail[4];
+} Vofa_ChassisPipelineFrame_t;
 
 static volatile uint8_t vofa_pid_cmd_pending = 0U;
 static volatile uint16_t vofa_pid_cmd_len = 0U;
@@ -436,6 +444,70 @@ HAL_StatusTypeDef Vofa_Send_Speed_Control_Info(UART_HandleTypeDef *huart, const 
     };
 
     return HAL_UART_Transmit(huart, (uint8_t *)&frame, sizeof(Vofa_Frame_t), 100);
+}
+
+HAL_StatusTypeDef Vofa_Send_ChassisPipeline_Debug(UART_HandleTypeDef *huart,
+                                                   const chassis_move_t *chassis)
+{
+    if (huart == NULL || chassis == NULL)
+    {
+        return HAL_ERROR;
+    }
+    for (uint8_t i = 0U; i < 4U; i++)
+    {
+        if (chassis->chassis_motor[i].chassis_motor_measure == NULL)
+        {
+            return HAL_ERROR;
+        }
+    }
+
+    Chassis_Current_Command_t current_command = {0};
+    const bool snapshot_valid = chassis_get_current_command(&current_command, HAL_GetTick());
+    const float diagnostic_code = (float)((uint32_t)chassis->control_output.state * 100U +
+                                          (uint32_t)chassis->control_output.fault * 10U +
+                                          (snapshot_valid ? 1U : 0U));
+
+    /* target rpm[0..3], feedback rpm[4..7], CAN snapshot current[8..11],
+       ESC feedback current[12..15], state/fault/valid code[16],
+       CAN TX dropped count[17], queue high watermark[18], corrected pitch deg[19]. */
+    Vofa_ChassisPipelineFrame_t frame = {
+        .data = {
+            chassis->chassis_motor[0].speed_set_rpm,
+            chassis->chassis_motor[1].speed_set_rpm,
+            chassis->chassis_motor[2].speed_set_rpm,
+            chassis->chassis_motor[3].speed_set_rpm,
+            chassis->chassis_motor[0].speed_rpm,
+            chassis->chassis_motor[1].speed_rpm,
+            chassis->chassis_motor[2].speed_rpm,
+            chassis->chassis_motor[3].speed_rpm,
+            snapshot_valid ? current_command.current_a[0] : 0.0f,
+            snapshot_valid ? current_command.current_a[1] : 0.0f,
+            snapshot_valid ? current_command.current_a[2] : 0.0f,
+            snapshot_valid ? current_command.current_a[3] : 0.0f,
+            (float)chassis->chassis_motor[0].chassis_motor_measure->current *
+                CHASSIS_MOTOR_1_FORWARD_SIGN * 0.1f,
+            (float)chassis->chassis_motor[1].chassis_motor_measure->current *
+                CHASSIS_MOTOR_2_FORWARD_SIGN * 0.1f,
+            (float)chassis->chassis_motor[2].chassis_motor_measure->current *
+                CHASSIS_MOTOR_3_FORWARD_SIGN * 0.1f,
+            (float)chassis->chassis_motor[3].chassis_motor_measure->current *
+                CHASSIS_MOTOR_4_FORWARD_SIGN * 0.1f,
+            diagnostic_code,
+            (float)BSP_CAN_GetTxQueueDropped(),
+            (float)BSP_CAN_GetTxQueueHighWatermark(),
+            (chassis->chassis_INS_angle != NULL) ?
+                Chassis_Hold_CorrectPitch(
+                    &chassis->control_manager.config.hold,
+                    *(chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET)) * VOFA_RAD_TO_DEG :
+                0.0f,
+        },
+        .tail = VOFA_TAIL,
+    };
+
+    return HAL_UART_Transmit(huart,
+                             (uint8_t *)&frame,
+                             sizeof(Vofa_ChassisPipelineFrame_t),
+                             100U);
 }
 
 HAL_StatusTypeDef Vofa_Send_Ultrasonic_Info(UART_HandleTypeDef *huart,

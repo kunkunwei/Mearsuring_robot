@@ -4,6 +4,7 @@
 #include "observe_task.h"
 #include "usart.h"
 #include "Ultrasonic_Task.h"
+#include "chassis_hold_ctrl.h"
 
 #define ROS_TASK_PERIOD_MS 10
 
@@ -36,6 +37,14 @@ void Ros_Task(void const *argument)
                 .distance = odom->distance,
                 .vx = odom->vx,
                 .wz = odom->wz,
+                .pitch_rad = (local_chassis->chassis_INS_angle != NULL) ?
+                             Chassis_Hold_CorrectPitch(
+                                 &local_chassis->control_manager.config.hold,
+                                 *(local_chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET)) :
+                             0.0f,
+                .roll_rad = (local_chassis->chassis_INS_angle != NULL) ?
+                            *(local_chassis->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET) :
+                            0.0f,
                 .motor_pos_deg = {
                     local_chassis->chassis_motor[0].pos_deg,
                     local_chassis->chassis_motor[1].pos_deg,

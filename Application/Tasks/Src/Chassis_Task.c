@@ -39,19 +39,6 @@ static fp32 chassis_abs(fp32 value)
     return (value >= 0.0f) ? value : -value;
 }
 
-static fp32 chassis_sign(fp32 value)
-{
-    if (value > 0.0f)
-    {
-        return 1.0f;
-    }
-    if (value < 0.0f)
-    {
-        return -1.0f;
-    }
-    return 0.0f;
-}
-
 static fp32 chassis_wrap_deg(fp32 angle)
 {
     while (angle > 180.0f)
@@ -90,35 +77,6 @@ static void chassis_limit_wheel_speed_keep_ratio(fp32 wheel_speed[4])
     }
 }
 
-static void chassis_apply_turn_min_rpm(chassis_move_t *chassis)
-{
-    if (chassis == NULL)
-    {
-        return;
-    }
-
-    if (chassis_abs(chassis->state_set.vx) > CHASSIS_TURN_MIN_VX_THRESHOLD ||
-        chassis_abs(chassis->state_set.wz) < CHASSIS_TURN_MIN_WZ_THRESHOLD)
-    {
-        return;
-    }
-
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        Chassis_Motor_t *motor = &chassis->chassis_motor[i];
-        const fp32 target_sign = chassis_sign(motor->speed_set_rpm);
-        if (target_sign == 0.0f)
-        {
-            continue;
-        }
-
-        if (chassis_abs(motor->speed_set_rpm) < CHASSIS_TURN_MIN_RPM)
-        {
-            motor->speed_set_rpm = target_sign * CHASSIS_TURN_MIN_RPM;
-            motor->speed_set = motor->speed_set_rpm * CHASSIS_MOTOR_RPM_TO_VECTOR_SEN;
-        }
-    }
-}
 // 搴曠洏杩愬姩鏁版嵁
 static chassis_move_t chassis_move;
 static Chassis_Current_Command_t chassis_current_command;
@@ -569,8 +527,6 @@ void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
         chassis_move_control_loop->chassis_motor[i].speed_set_rpm =
             chassis_move_control_loop->chassis_motor[i].speed_set * CHASSIS_MOTOR_VECTOR_TO_RPM_SEN;
     }
-    chassis_apply_turn_min_rpm(chassis_move_control_loop);
-
     Chassis_Control_Input_t control_input = {
         .enabled = 1U,
         .pitch_rad = (chassis_move_control_loop->chassis_INS_angle != NULL) ?

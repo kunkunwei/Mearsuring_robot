@@ -12,7 +12,7 @@ static const OdomConfig_t odom_default_config = {
     .wheel_speed_outlier_ratio = 2.0f,
     .wheel_speed_outlier_offset = 0.08f,
     .max_wheel_delta_m = 0.08f,
-    .imu_yaw_turn_weight = 0.75f,
+    .imu_yaw_turn_weight = 1.0f,
     .imu_yaw_straight_weight = 0.20f,
     .straight_pair = ODOM_STRAIGHT_PAIR_REAR,
 };

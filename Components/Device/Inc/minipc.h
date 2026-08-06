@@ -10,7 +10,7 @@
 #define MINIPC_ADDR_CHASSIS_ODOM               0x32U
 #define MINIPC_ADDR_ODOM_RESET                 0x33U
 #define MINIPC_CHASSIS_CMD_FRAME_LENGTH        12U
-#define MINIPC_CHASSIS_ODOM_FRAME_LENGTH       51U
+#define MINIPC_CHASSIS_ODOM_FRAME_LENGTH       59U
 #define MINIPC_ODOM_RESET_FRAME_LENGTH         6U
 #define MINIPC_ODOM_RESET_COMMAND              0x01U
 #define MINIPC_CHASSIS_CMD_TIMEOUT_MS          500U
@@ -38,6 +38,8 @@ typedef struct
     float distance;
     float vx;
     float wz;
+    float pitch_rad;
+    float roll_rad;
     float motor_pos_deg[4];
     uint16_t left_mm;
     uint16_t right_mm;
@@ -70,6 +72,8 @@ typedef struct
     float distance;
     float vx;
     float wz;
+    float pitch_rad;
+    float roll_rad;
     float motor_pos_deg[4];
     uint16_t left_mm;
     uint16_t right_mm;

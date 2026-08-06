@@ -154,20 +154,23 @@ void INS_Task(void const *argument)
         /* 更新四元数扩展卡尔曼滤波器，融合陀螺仪和加速度计数据 */
         QuaternionEKF_Update(&Quaternion_Info, INS_Info.gyro, INS_Info.accel, 0.001f);
 
-        /* 复制欧拉角结果到INS信息结构体 */
-        memcpy(INS_Info.angle, Quaternion_Info.EulerAngle, sizeof(INS_Info.angle));
+        /* 将传感器系欧拉角转换为车体系欧拉角。
+         * IMU 板相对车体绕 Z 轴逆时针旋转 90°（x_imu→车体左，y_imu→车体后）：
+         *   传感器系 EulerAngle 约定固定为 [0]=yaw, [1]=pitch, [2]=roll（EKF 输出）。
+         *   车体 pitch = +EulerAngle[2]（传感器 roll）
+         *   车体 roll  = -EulerAngle[1]（传感器 pitch）
+         *   车体 yaw   = EulerAngle[0] + 90° 常数偏移（增量不受影响，绝对零位待上电标定）
+         * 车头抬起（上坡）时车体 pitch 为负，与底盘斜坡前馈的符号约定一致。 */
+        INS_Info.angle[0] = Quaternion_Info.EulerAngle[0];
+        INS_Info.angle[1] = Quaternion_Info.EulerAngle[2];
+        INS_Info.angle[2] = -Quaternion_Info.EulerAngle[1];
 
-        /* 更新欧拉角数据（弧度制） */
-        INS_Info.pit_angle = Quaternion_Info.EulerAngle[2]; // 俯仰角
-        // INS_Info.yaw_angle = -Quaternion_Info.EulerAngle[IMU_ANGLE_INDEX_YAW];   // 偏航角
-        INS_Info.rol_angle = Quaternion_Info.EulerAngle[1];  // 横滚角
+        /* INS_Info.angle 已是车体系角度，结构体字段直接引用。 */
+        INS_Info.pit_angle = INS_Info.angle[1];
+        INS_Info.rol_angle = INS_Info.angle[2];
 
-        first_order_filter_cali(&yaw_low_filter,-Quaternion_Info.EulerAngle[IMU_ANGLE_INDEX_YAW]);
+        first_order_filter_cali(&yaw_low_filter,-INS_Info.angle[0]);
         INS_Info.yaw_angle=yaw_low_filter.out;
-
-        // INS_Info.pit_angle = Quaternion_Info.EulerAngle[IMU_ANGLE_INDEX_PITCH]; // 俯仰角
-        // INS_Info.yaw_angle = Quaternion_Info.EulerAngle[IMU_ANGLE_INDEX_YAW];   // 偏航角
-        // INS_Info.rol_angle = Quaternion_Info.EulerAngle[IMU_ANGLE_INDEX_ROLL];  // 横滚角
 
         /* 更新YAW轴累积总角度（处理多圈旋转） */
         if (INS_Info.yaw_angle - INS_Info.last_yawangle < -3.141593f) {
@@ -185,9 +188,10 @@ void INS_Task(void const *argument)
         INS_Info.yaw_tolangle = INS_Info.yaw_angle + INS_Info.YawRoundCount * 2 * 3.141593f;
 
         /* 更新各轴角速度数据（弧度/秒） */
-        INS_Info.pit_gyro = INS_Info.gyro[0]; // 俯仰轴角速度
+        /* 车体 pitch/roll 角速度按同样的 90° 轴映射取用。 */
+        INS_Info.pit_gyro = INS_Info.gyro[0]; // 车体 pitch 角速度（传感器 roll 轴）
         // INS_Info.yaw_gyro = -INS_Info.gyro[IMU_GYRO_INDEX_YAW];   // 偏航轴角速度
-        INS_Info.rol_gyro = INS_Info.gyro[1];  // 横滚轴角速度
+        INS_Info.rol_gyro = -INS_Info.gyro[1]; // 车体 roll 角速度（传感器 pitch 轴）
 
         first_order_filter_cali(&yaw_gyro_low_filter,-INS_Info.gyro[IMU_GYRO_INDEX_YAW]);
          INS_Info.yaw_gyro=yaw_gyro_low_filter.out;

@@ -99,16 +99,25 @@ static void test_odom_frame_contains_applied_segment_id(void)
     UART_HandleTypeDef huart = {0};
     MiniPC_ChassisOdom_Typedef odom = {0};
     odom.x = 1.0f;
+    odom.pitch_rad = 0.087f;
+    odom.roll_rad = -0.017f;
     odom.segment_id = 12U;
 
-    assert(MINIPC_CHASSIS_ODOM_FRAME_LENGTH == 51U);
+    assert(MINIPC_CHASSIS_ODOM_FRAME_LENGTH == 59U);
     assert(MiniPC_SendChassisOdomUART(&huart, &odom));
     assert(uart_tx_length == MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
     assert(uart_tx[0] == MINIPC_FRAME_HEADER);
     assert(uart_tx[1] == MINIPC_ADDR_CHASSIS_ODOM);
     assert(uart_tx[2] == MINIPC_CHASSIS_ODOM_FRAME_LENGTH);
-    assert(uart_tx[49] == 12U);
-    assert(uart_tx[50] == checksum(uart_tx, 50U));
+    assert(uart_tx[57] == 12U);
+    assert(uart_tx[58] == checksum(uart_tx, 58U));
+
+    float pitch = 0.0f;
+    float roll = 0.0f;
+    memcpy(&pitch, &uart_tx[27], sizeof(pitch));
+    memcpy(&roll, &uart_tx[31], sizeof(roll));
+    assert(fabsf(pitch - 0.087f) < 0.0001f);
+    assert(fabsf(roll + 0.017f) < 0.0001f);
 }
 
 int main(void)
