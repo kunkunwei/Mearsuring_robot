@@ -1,83 +1,113 @@
-# Mearsuring Robot
+# 管道测量机器人底盘控制（STM32F407 / FreeRTOS）
 
-管道复尺测绘机器人底盘控制工程。项目基于 RoboMaster C 型开发板 STM32F407 和 FreeRTOS，实现四轮独立驱动差速底盘控制、N630/VESC 电调 CAN 通信、编码器/IMU 里程计估计、USB 上位机通信和调试数据输出。
+四轮独立驱动（4WD）差速转向底盘控制工程，用于狭窄方形管道内的距离测量。底盘负责稳定行驶、里程计估计、超声波测距回传，并与树莓派上位机通过串口通信。
 
-## 项目目标
-
-机器人用于狭窄、平整、可能无光照的方形管道内距离测量。底盘需要稳定沿管道中心行驶，并满足 1 m 行驶距离误差不超过 1 cm 的里程计精度目标。后续树莓派上位机会结合雷达数据进行中心循迹和路径规划。
+> 当前分支为 `codex/safe-mit-control`：有界 MIT 电流控制基础版，仍在实车测试阶段，**不要合入 `main`**。后续增强（转向破静摩擦、每轮驻坡位置闭环、59 字节通信帧、INS 车体系角度、转弯纯 IMU yaw）在 `codex/v3.0` 分支。
 
 ## 硬件与通信
 
-- 主控：RoboMaster C 板，STM32F407。
-- 实时系统：FreeRTOS。
-- 底盘：四轮独立驱动，差速转向。
-- 电机：M3508 直驱轮，减速箱已拆除。
-- 电调：N630/VESC，使用 CAN1 通信。
-- 上位机：树莓派，当前通过 USB CDC 通信，后续可切换 USART6。
-- 调试：USART6 当前用于 VOFA+ 调试输出。
-- IMU：用于 yaw 和角速度辅助里程计与状态判断。
+- 主控：RoboMaster C 开发板，STM32F407，FreeRTOS。
+- 底盘：四轮独立驱动，差速转向；M3508 直驱轮（减速箱已拆除）。
+- 电调：VESC（兼容 N630），CAN1 @ 500 kbit/s。
+- IMU：板载 BMI088（陀螺/加速度）+ IST8310（磁力计，**未标定**）。
+- 超声波：左右各一个 SR09，I2C 读取，测距随里程计帧回传。
+- 上位机：树莓派。当前通过 **USART6（115200 8N1，经 CP2102N USB-UART 转接）** 通信；`MiniPC_SendChassisOdomUSB()` 的 USB CDC 打包接口保留。
+- 调试：USART6 同口可用于 VOFA+ 调试输出（通过 User_Task 开关）。
 
-## 控制模式
+## 控制模式（遥控器状态机）
 
-遥控器状态机如下：
+| 拨杆 | 模式 | 说明 |
+| --- | --- | --- |
+| 右拨杆下 | 无力模式 | 底盘不输出电流 |
+| 右拨杆中 | 手动模式 | 摇杆控制前进/后退/转向 |
+| 右拨杆上 | ROS 控制 | 接收上位机 `vx`/`wz` 指令，500 ms 超时归零 |
+| 左拨杆上 | 驻坡/锁定（HOLD_TEST） | 优先级最高，锁定四轮中值位置 |
+| 左拨杆下沿 | 清零里程计 | 切换瞬间触发 `chassis_odom_reset()` |
 
-- 右拨杆下拨：无力模式，底盘不输出力矩。
-- 右拨杆中位：遥控手动模式，遥控器摇杆控制前进、后退和转向。
-- 右拨杆上拨：ROS 控制模式，底盘接收树莓派通过 USB 发送的 `vx`、`wz` 指令。
-- 左拨杆上拨：原地固定模式，优先级最高，用于锁定当前位置。
+控制量约定：`vx` 单位 m/s，车体前进为正；`wz` 单位 rad/s，逆时针为正。
 
-上位机控制量单位：
+## 通信协议速览
 
-- `vx`：m/s，车体前进方向为正。
-- `wz`：rad/s，逆时针旋转为正。
+详见 [docs/chassis_protocol.md](docs/chassis_protocol.md)：
 
-## MiniPC 通信协议
+| 帧 | 方向 | 地址 | 长度 | 内容 |
+| --- | --- | --- | --- | --- |
+| 速度指令 | 上位机 → 底盘 | `0x31` | 12 | `vx`、`wz` |
+| 分段清零 | 上位机 → 底盘 | `0x33` | 6 | `segment_id`，等待确认后可重复发送 |
+| 里程计反馈 | 底盘 → 上位机 | `0x32` | **51** | `x/y/yaw/distance/vx/wz/四轮连续角度/左右超声波/segment_id`，100 Hz |
 
-上位机到底盘控制帧长度为 12 字节：
+> 该分支里程计帧为 51 字节（无 pitch/roll）。`codex/v3.0` 已扩展为 59 字节并新增 pitch/roll，上位机对接不同固件版本时需按帧长度字段自适应。
 
-| 字节 | 内容 |
-| --- | --- |
-| 0 | 帧头 `0x42` |
-| 1 | 地址 `0x31` |
-| 2 | 帧长 `12` |
-| 3-6 | `float vx`，小端 |
-| 7-10 | `float wz`，小端 |
-| 11 | checksum，前 11 字节累加 |
+## 主要控制模块
 
-底盘到上位机里程计帧长度为 36 字节，包含 `x`、`y`、`yaw`、`distance`、`vx`、`wz` 和四个电机编码器值。
+### RTOS 任务（`Core/Src/freertos.c`）
 
-## 主要模块
+| 任务 | 周期 | 优先级 | 职责 |
+| --- | --- | --- | --- |
+| `INS_Task` | 1 ms | Realtime | BMI088 采集、四元数 EKF、传感器系欧拉角、IMU 温度控制 |
+| `Can_Task` | 5 ms | High | VESC 电流指令发送、电机状态解析 |
+| `Ultrasonic_Task` | — | High | SR09 超声波 I2C 轮询 |
+| `Chassis_Task` | 2 ms | AboveNormal | 模式状态机、运动学分解、控制状态机、5 ms 扭矩发布 |
+| `Ros_Task` | 10 ms | Normal | 组装并发送 51 字节里程计帧（USART6） |
+| `ObserveTask` | 5 ms | Idle | 卡尔曼速度估计、里程计融合、分段清零、磁航向修正 |
+| `User_Task` | 30 ms | Idle | 蜂鸣器/指示灯、可选 VOFA 调试输出 |
 
-- `Application/Tasks/Src/Chassis_Task.c`：底盘任务、模式切换、运动学分解和控制器调用。
-- `Application/Tasks/Src/observe_task.c`：里程计与状态估计任务。
-- `Application/Tasks/Src/Ros_Task.c`：USB/上位机里程计回传。
-- `Components/Controller/Src/chassis_mit_ctrl.c`：MIT 风格电流控制。
-- `Components/Controller/Src/chassis_brake.c`：停车制动、制动限幅和简化 ABS 防抱死逻辑。
-- `Components/Algorithm/Src/odometry.c`：四轮编码器、IMU yaw 和运动指令融合的里程计估计。
-- `Components/Device/Src/mymotor.c`：电机反馈数据结构与 VESC 状态解析。
-- `Components/Device/Src/minipc.c`：上位机控制帧解析与里程计帧打包。
-- `Bsp/Src/bsp_can.c`：CAN 底层收发。
-- `Bsp/Src/vofa.c`：VOFA+ 调试数据发送和 PID 调参命令解析。
+### 控制器（`Components/Controller/`）
 
-## VESC/CAN 配置建议
+- `chassis_control_manager.c`：**核心状态机**，DISABLED → DRIVE → BRAKE → HOLD → FAULT，统一限幅与故障保护。
+- `chassis_mit_ctrl.c`：DRIVE 模式下的有界 MIT 电流控制（位置跟踪 + 速度阻尼 + 摩擦前馈）。
+- `chassis_hold_ctrl.c`：HOLD/BRAKE 的**四轮中值位置**保持与速度阻尼（默认无重力前馈）。
+- `chassis_brake.c`：制动阻尼与限幅。
+
+本分支与 `codex/v3.0` 的主要差异：
+
+- HOLD 是四轮中值位置闭环，不是每轮独立位置闭环（单轮转动会被中值算法忽略）。
+- 无转向破静摩擦补偿（`turn_breakaway_*` 不存在）；纯转向目标转速会被 `CHASSIS_TURN_MIN_RPM`（120 rpm）强制抬升。
+- HOLD 重力前馈默认关闭（`pitch_feedforward_a = 0`），无 `pitch_zero_offset`。
+- 电流斜率限幅为单一 `current_slew_a_per_s`（10 A/s），且 DRIVE/BRAKE/HOLD 电流上限均为 0.5 A。
+- 转弯 odom yaw 权重 0.75（IMU 75% + 编码器 25%）。
+
+### 算法 / 设备 / BSP
+
+- `Components/Algorithm/odometry.c`：四轮编码器 + IMU yaw 融合里程计。
+- `Components/Algorithm/magnetic_heading.c`：磁航向估计（未标定，修正速率受限）。
+- `Components/Device/minipc.c`：协议解析/打包。
+- `Components/Device/mymotor.c`：VESC 状态解析与电流指令。
+- `Bsp/bsp_can.c` / `Bsp/vofa.c`：CAN 收发、VOFA+ 调试与在线调参。
+
+## 调参入口速查
+
+完整说明见 [docs/control_tuning.md](docs/control_tuning.md)：
+
+- 控制器默认参数：`Chassis_ControlManager_DefaultConfig()`（`Components/Controller/Src/chassis_control_manager.c`）。
+- 底盘限速/运动学参数：`Application/Tasks/Inc/Chassis_Task.h`（含 `CHASSIS_TURN_MIN_RPM`）。
+- 里程计参数：`OdomConfig_t`（`Components/Algorithm/Src/odometry.c`）。
+- INS 滤波/EKF 噪声/安装映射：`Application/Tasks/Src/INS_Task.c`。
+- 观测任务卡尔曼与磁力计：`Application/Tasks/Src/observe_task.c`。
+- VOFA+ 在线调参：发送 `KP=xx` / `KI=xx` / `KD=xx`（映射说明见调参文档）。
+
+## VESC / CAN 配置建议
 
 - CAN 波特率：500 kbit/s。
-- Status Rate 1：500 Hz，只勾选 Status 1，用于 RPM、电流、占空比。
-- Status Rate 2：建议 100-250 Hz，只勾选 Status 4，用于 PID-position Now。
-- Status 5 当前不作为主里程计输入。
+- Status Rate 1：500 Hz，勾选 Status 1（RPM、电流、占空比）。
+- Status Rate 2：建议 100~250 Hz，勾选 Status 4（PID-position Now，用于连续角度）。
+- Status 5 当前不作为里程计输入。
 
 ## 构建说明
 
-工程使用 CLion + STM32CubeCLT/CMake 构建，核心工程文件包括：
+CLion + STM32CubeCLT/CMake。核心工程文件：`CMakeLists.txt`、`Mearsuring_robot.ioc`、`STM32F407IGHX_FLASH.ld`。
 
-- `CMakeLists.txt`
-- `CMakeLists_template.txt`
-- `Mearsuring_robot.ioc`
-- `STM32F407IGHX_FLASH.ld`
-- `STM32F407IGHX_RAM.ld`
+若用 STM32CubeMX 重新生成工程，需检查 `Core/Src/can.c` 的 CAN1 波特率仍为 500 kbit/s，并确认 `CMakeLists.txt` 未被覆盖。
 
-如果使用 STM32CubeMX 重新生成工程，需要检查 `Core/Src/can.c` 中 CAN1 是否仍为 500 kbit/s，并确认 `CMakeLists.txt` 没有被覆盖为错误配置。
+## 已知问题
+
+1. **纯转向四轮响应不一致**：vofa55 实测 M2 目标 74 rpm 反馈仅约 29 rpm 且电流顶限幅，M1 超速至 123 rpm。导轮缺螺丝、整车松动会直接放大此问题，先紧固机械再调参。
+2. **HOLD 中单轮空转**：本分支 HOLD 只锁四轮中值位置，单轮转动会被忽略，且无重力前馈，坡上驻车不完整。
+3. **odom yaw 误差**：转弯时 IMU 权重 0.75 且混入编码器，旋转抖动时 yaw 会明显低估（110° 实测仅回报约 16° 的场景即出自该分支阶段）。
+4. **电流上限偏小**：DRIVE/BRAKE/HOLD 均为 0.5 A，破静摩擦不足，实测需要更大电流时请按调参文档上调。
+
+以上问题已在 `codex/v3.0` 分支针对性重构，本分支仅保留作为 MIT 控制基础版本。
 
 ## 备注
 
-仓库不提交本地构建产物、VOFA/CAN 测试 CSV、PPT 输出和 IDE 缓存文件。调试数据请保留在本地，不进入版本库。
+仓库不提交本地构建产物、VOFA/CAN 测试 CSV、PPT 输出和 IDE 缓存文件。上位机代码（`PC/`）单独管理，不随本固件仓库提交。
