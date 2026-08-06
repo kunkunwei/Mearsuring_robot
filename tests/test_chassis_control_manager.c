@@ -115,6 +115,49 @@ static void test_mit_speed_integral_clears_at_zero_target(void)
     assert(fabsf(output.speed_integral_current_a) <= 1.0e-6f);
 }
 
+static void test_mit_speed_error_channel_has_independent_limit(void)
+{
+    const Chassis_Mit_Config_t config = {
+        .speed_kd_a_per_rpm = 0.10f,
+        .speed_ki_a_per_rpm_s = 0.10f,
+        .speed_integral_limit_a = 3.0f,
+        .speed_error_current_limit_a = 1.5f,
+        .current_limit_a = 10.0f,
+    };
+    Chassis_Mit_State_t state;
+    Chassis_Mit_Output_t output;
+    const Chassis_Mit_Input_t input = {.target_rpm = 100.0f};
+
+    Chassis_Mit_Reset(&state, 0.0f);
+    for (size_t step = 0U; step < 30U; step++)
+    {
+        Chassis_Mit_Update(&state, &config, &input, 0.100f, &output);
+        assert(fabsf(output.speed_channel_current_a) <= 1.5f + 1.0e-6f);
+    }
+    assert(fabsf(output.raw_current_a - 1.5f) <= 1.0e-5f);
+}
+
+static void test_mit_slip_limited_wheel_drops_tracking_current(void)
+{
+    const Chassis_Mit_Config_t config = {
+        .speed_kd_a_per_rpm = 0.10f,
+        .speed_integral_limit_a = 1.0f,
+        .current_limit_a = 10.0f,
+    };
+    Chassis_Mit_State_t state;
+    Chassis_Mit_Output_t output;
+    const Chassis_Mit_Input_t input = {
+        .target_rpm = 100.0f,
+        .slip_limited = 1U,
+    };
+
+    Chassis_Mit_Reset(&state, 0.0f);
+    Chassis_Mit_Update(&state, &config, &input, 0.100f, &output);
+
+    assert(output.raw_current_a == 0.0f);
+    assert(output.speed_integral_current_a == 0.0f);
+}
+
 static void test_disabled_output_is_zero(void)
 {
     Chassis_Control_Manager_t manager;
@@ -163,7 +206,11 @@ static void test_pure_turn_breakaway_current_is_separate_from_rolling_friction(v
     config.drive.friction_rpm_scale = 100.0f;
     config.turn_breakaway_current_a = 2.5f;
     config.turn_breakaway_target_rpm = 30.0f;
-    config.turn_breakaway_speed_rpm = 80.0f;
+    config.turn_breakaway_enter_rpm = 15.0f;
+    config.turn_breakaway_release_ratio = 0.90f;
+    config.turn_breakaway_hold_time_s = 10.0f;
+    config.turn_breakaway_taper_time_s = 1.0f;
+    config.turn_sync_enabled = 0U;
     config.current_rise_a_per_s = 1000.0f;
     config.current_release_a_per_s = 1000.0f;
     Chassis_ControlManager_Init(&manager, &config);
@@ -199,6 +246,215 @@ static void test_pure_turn_breakaway_current_is_separate_from_rolling_friction(v
     assert(output.raw_current_a[0] < 0.6f);
     assert(output.raw_current_a[1] < -0.3f);
     assert(output.raw_current_a[1] > -0.6f);
+}
+
+static void test_pure_turn_breakaway_does_not_reengage_above_enter_speed(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.drive.position_kp_a_per_deg = 0.0f;
+    config.drive.speed_kd_a_per_rpm = 0.0f;
+    config.drive.speed_ki_a_per_rpm_s = 0.0f;
+    config.drive.friction_current_a = 0.0f;
+    config.drive.friction_rpm_scale = 100.0f;
+    config.turn_sync_enabled = 0U;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    config.turn_breakaway_current_a = 2.5f;
+    config.turn_breakaway_target_rpm = 30.0f;
+    config.turn_breakaway_enter_rpm = 15.0f;
+    config.turn_breakaway_release_ratio = 0.90f;
+    config.turn_breakaway_hold_time_s = 10.0f;
+    config.turn_breakaway_taper_time_s = 1.0f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = (i == 0U || i == 3U) ? 77.0f : -77.0f;
+    }
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(output.raw_current_a[0] >= 2.4f);
+
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.speed_rpm[i] = (i == 0U || i == 3U) ? 70.0f : -70.0f;
+    }
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[0]) <= 1.0e-4f);
+
+    for (size_t step = 0U; step < 20U; step++)
+    {
+        for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+        {
+            input.speed_rpm[i] = (i == 0U || i == 3U) ? 50.0f : -50.0f;
+        }
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+        assert(fabsf(output.raw_current_a[0]) <= 1.0e-4f);
+    }
+}
+
+static void test_pure_turn_breakaway_taper_releases_dragging_wheel(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.drive.position_kp_a_per_deg = 0.0f;
+    config.drive.speed_kd_a_per_rpm = 0.0f;
+    config.drive.speed_ki_a_per_rpm_s = 0.0f;
+    config.drive.friction_current_a = 0.0f;
+    config.drive.friction_rpm_scale = 100.0f;
+    config.turn_sync_enabled = 0U;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    config.turn_breakaway_current_a = 2.5f;
+    config.turn_breakaway_target_rpm = 30.0f;
+    config.turn_breakaway_enter_rpm = 15.0f;
+    config.turn_breakaway_release_ratio = 0.90f;
+    config.turn_breakaway_hold_time_s = 0.050f;
+    config.turn_breakaway_taper_time_s = 0.050f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = (i == 0U || i == 3U) ? 77.0f : -77.0f;
+        input.speed_rpm[i] = 0.0f;
+    }
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(output.raw_current_a[0] >= 2.4f);
+
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.speed_rpm[i] = (i == 0U || i == 3U) ? 30.0f : -30.0f;
+    }
+    for (size_t step = 0U; step < 25U; step++)
+    {
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    }
+    assert(fabsf(output.raw_current_a[0]) <= 1.0e-4f);
+
+    for (size_t step = 0U; step < 10U; step++)
+    {
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+        assert(fabsf(output.raw_current_a[0]) <= 1.0e-4f);
+    }
+}
+
+static void test_pure_turn_sync_scales_all_wheels_to_slowest(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.drive.position_kp_a_per_deg = 0.0f;
+    config.drive.speed_kd_a_per_rpm = 0.0f;
+    config.drive.speed_ki_a_per_rpm_s = 0.0f;
+    config.drive.friction_current_a = 0.5f;
+    config.drive.friction_rpm_scale = 100.0f;
+    config.turn_breakaway_current_a = 0.0f;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    config.turn_sync_enabled = 1U;
+    config.turn_sync_min_ratio = 0.25f;
+    config.turn_sync_time_s = 0.100f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = (i == 0U || i == 3U) ? 77.0f : -77.0f;
+    }
+    input.speed_rpm[0] = -77.0f;
+    input.speed_rpm[1] = 70.0f;
+    input.speed_rpm[2] = 30.0f;
+    input.speed_rpm[3] = -77.0f;
+
+    for (size_t step = 0U; step < 120U; step++)
+    {
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    }
+
+    const float expected_slow_current_a = 0.5f * tanhf(30.0f / 100.0f);
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        const float expected = (i == 0U || i == 3U) ?
+                               expected_slow_current_a :
+                               -expected_slow_current_a;
+        assert(fabsf(output.raw_current_a[i] - expected) <= 0.01f);
+    }
+
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.speed_rpm[i] = (i == 0U || i == 3U) ? -77.0f : 77.0f;
+    }
+    for (size_t step = 0U; step < 120U; step++)
+    {
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    }
+    const float expected_full_current_a = 0.5f * tanhf(77.0f / 100.0f);
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        const float expected = (i == 0U || i == 3U) ?
+                               expected_full_current_a :
+                               -expected_full_current_a;
+        assert(fabsf(output.raw_current_a[i] - expected) <= 0.01f);
+    }
+}
+
+static void test_drive_slip_limit_disables_dragging_wheel_tracking(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.drive.position_kp_a_per_deg = 0.0f;
+    config.drive.speed_kd_a_per_rpm = 0.01f;
+    config.drive.speed_ki_a_per_rpm_s = 0.0f;
+    config.drive.friction_current_a = 0.0f;
+    config.turn_sync_enabled = 0U;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = 77.0f;
+    }
+    input.speed_rpm[0] = 70.0f;
+    input.speed_rpm[1] = 30.0f;
+    input.speed_rpm[2] = 70.0f;
+    input.speed_rpm[3] = 70.0f;
+
+    for (size_t step = 0U; step < 50U; step++)
+    {
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    }
+    assert(fabsf(output.raw_current_a[1] - 0.47f) <= 1.0e-4f);
+    assert(fabsf(output.raw_current_a[0] - 0.07f) <= 1.0e-4f);
+
+    for (size_t step = 0U; step < 60U; step++)
+    {
+        Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    }
+    assert(output.raw_current_a[1] == 0.0f);
+    assert(fabsf(output.raw_current_a[0] - 0.07f) <= 1.0e-4f);
+
+    input.speed_rpm[1] = 70.0f;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[1] - 0.07f) <= 1.0e-4f);
 }
 
 static void test_drive_keeps_pitch_feedforward_on_slope(void)
@@ -865,9 +1121,15 @@ int main(void)
     test_mit_speed_integral_stops_at_output_saturation();
     test_mit_speed_integral_resets_on_target_reversal();
     test_mit_speed_integral_clears_at_zero_target();
+    test_mit_speed_error_channel_has_independent_limit();
+    test_mit_slip_limited_wheel_drops_tracking_current();
     test_disabled_output_is_zero();
     test_nonzero_command_enters_bounded_drive();
     test_pure_turn_breakaway_current_is_separate_from_rolling_friction();
+    test_pure_turn_breakaway_does_not_reengage_above_enter_speed();
+    test_pure_turn_breakaway_taper_releases_dragging_wheel();
+    test_pure_turn_sync_scales_all_wheels_to_slowest();
+    test_drive_slip_limit_disables_dragging_wheel_tracking();
     test_drive_keeps_pitch_feedforward_on_slope();
     test_zero_command_brakes_before_hold();
     test_release_captures_position_and_compensates_pitch_during_brake();

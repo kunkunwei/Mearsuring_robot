@@ -33,6 +33,7 @@ fault：0=无，1=反馈丢失，2=超速，3=震荡，4=饱和，5=时序。
 | `speed_kd_a_per_rpm` | 0.008 | 速度阻尼（A/rpm）。抑制超调；过大会发闷、响应慢 |
 | `speed_ki_a_per_rpm_s` | 0.01 | 速度积分（A/(rpm·s)）。消除稳态静差；过大引起抖动/振荡 |
 | `speed_integral_limit_a` | 1.0 | 积分项上限，防积分饱和 |
+| `speed_error_current_limit_a` | 1.5 | **速度误差通道（kd+积分）独立限幅（A）**，与摩擦/破静摩擦前馈分开限，防止多路前馈在拖滞轮上叠加成 2.7A 级别的高电流 |
 | `friction_current_a` | 1.0 | 滚动摩擦前馈（A），按目标转速 tanh 平滑建立，用于匀速段补偿 |
 | `friction_rpm_scale` | 100 | 摩擦前馈达到饱和的目标转速尺度（rpm） |
 | `position_error_limit_deg` | 5.0 | 位置误差限幅，防止急停/急转产生电流尖峰 |
@@ -68,7 +69,26 @@ fault：0=无，1=反馈丢失，2=超速，3=震荡，4=饱和，5=时序。
 | --- | --- | --- |
 | `turn_breakaway_current_a` | 2.5 | 纯转向且该轮尚未跟上时，额外注入的破静摩擦电流（A） |
 | `turn_breakaway_target_rpm` | 30 | 补偿随目标转速平滑建立的速度尺度（rpm） |
-| `turn_breakaway_speed_rpm` | 80 | 轮速达到该值后补偿完全退出（rpm） |
+| `turn_breakaway_enter_rpm` | 15 | 轮速低于该值才介入（起转阶段） |
+| `turn_breakaway_release_ratio` | 0.90 | 轮速达到目标转速的该比例后释放，配合进入阈值形成滞回，**避免补偿阈值贴着工作点（如 77 vs 80）造成极限环** |
+| `turn_breakaway_hold_time_s` | 0.50 | 持续介入超过该时间仍未跟上目标，开始衰减 |
+| `turn_breakaway_taper_time_s` | 0.25 | 超时后电流线性衰减到 0 的时间，防止拖滞轮被长期加压 |
+
+### 2.5.1 纯转向同步降速（`turn_sync_*`）
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `turn_sync_enabled` | 1 | 纯转向时以最慢轮为基准，四轮目标同步缩放 |
+| `turn_sync_min_ratio` | 0.25 | 同步比例下限（目标最多降到此比例） |
+| `turn_sync_time_s` | 0.10 | 同步比例低通时间常数，防止速度波动导致目标抖动 |
+
+### 2.5.2 长期拖滞轮限制（`drive_slip_*`）
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `drive_slip_error_ratio` | 0.40 | 轮速落后目标超过该比例（<60%）即累计拖滞时间 |
+| `drive_slip_recover_ratio` | 0.20 | 轮速回到目标的 80% 以上即恢复（滞回） |
+| `drive_slip_confirm_time_s` | 0.50 | 拖滞持续该时间后，该轮停止跟踪（积分清零、速度/摩擦前馈置 0，仅保留 pitch 重力前馈） |
 
 ### 2.6 限幅与保护
 

@@ -142,6 +142,11 @@ static void control_enter_drive(Chassis_Control_Manager_t *manager,
 {
     manager->state = CHASSIS_CTRL_DRIVE;
     manager->hold_still_time_s = 0.0f;
+    manager->turn_sync_ratio = 1.0f;
+    memset(manager->breakaway_engaged, 0, sizeof(manager->breakaway_engaged));
+    memset(manager->breakaway_engaged_time_s, 0, sizeof(manager->breakaway_engaged_time_s));
+    memset(manager->drive_slip_elapsed_s, 0, sizeof(manager->drive_slip_elapsed_s));
+    memset(manager->drive_slip_limited, 0, sizeof(manager->drive_slip_limited));
     Chassis_Hold_Reset(&manager->hold_state);
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
@@ -225,6 +230,7 @@ void Chassis_ControlManager_DefaultConfig(Chassis_Control_Config_t *config)
             .speed_kd_a_per_rpm = 0.008f,
             .speed_ki_a_per_rpm_s = 0.01f,
             .speed_integral_limit_a = 1.0f,
+            .speed_error_current_limit_a = 1.5f,
             .friction_current_a = 1.00f,
             .friction_rpm_scale = 100.0f,
             .position_error_limit_deg = 5.0f,
@@ -246,7 +252,16 @@ void Chassis_ControlManager_DefaultConfig(Chassis_Control_Config_t *config)
         .command_deadband_rpm = 3.0f,
         .turn_breakaway_current_a = 2.50f,
         .turn_breakaway_target_rpm = 30.0f,
-        .turn_breakaway_speed_rpm = 80.0f,
+        .turn_breakaway_enter_rpm = 15.0f,
+        .turn_breakaway_release_ratio = 0.90f,
+        .turn_breakaway_hold_time_s = 0.500f,
+        .turn_breakaway_taper_time_s = 0.250f,
+        .turn_sync_enabled = 1U,
+        .turn_sync_min_ratio = 0.25f,
+        .turn_sync_time_s = 0.100f,
+        .drive_slip_error_ratio = 0.40f,
+        .drive_slip_recover_ratio = 0.20f,
+        .drive_slip_confirm_time_s = 0.500f,
         .hold_enter_speed_rpm = 5.0f,
         .hold_enter_time_s = 0.100f,
         .current_rise_a_per_s = 30.0f,
@@ -280,6 +295,7 @@ void Chassis_ControlManager_Init(Chassis_Control_Manager_t *manager,
     {
         manager->config = *config;
     }
+    manager->turn_sync_ratio = 1.0f;
     manager->state = CHASSIS_CTRL_DISABLED;
 }
 
@@ -315,6 +331,158 @@ void Chassis_ControlManager_SetDriveGains(Chassis_Control_Manager_t *manager,
                                                               manager->config.drive.current_limit_a);
 }
 
+static void control_breakaway_reset_wheel(Chassis_Control_Manager_t *manager, uint8_t wheel)
+{
+    manager->breakaway_engaged[wheel] = 0U;
+    manager->breakaway_engaged_time_s[wheel] = 0.0f;
+}
+
+static float control_turn_breakaway_correction(Chassis_Control_Manager_t *manager,
+                                               uint8_t wheel,
+                                               float target_rpm,
+                                               float speed_rpm,
+                                               float rolling_friction_a,
+                                               float dt_s)
+{
+    const Chassis_Control_Config_t *config = &manager->config;
+    const int8_t target_sign = control_sign(target_rpm);
+    const float abs_target = control_abs(target_rpm);
+
+    if (config->turn_breakaway_current_a <= 0.0f ||
+        config->turn_breakaway_target_rpm <= 0.0f ||
+        target_sign == 0 ||
+        abs_target <= config->command_deadband_rpm)
+    {
+        control_breakaway_reset_wheel(manager, wheel);
+        return 0.0f;
+    }
+
+    /* 滞回：转速达到目标的 release_ratio 后释放，重新介入要求低于 enter_rpm，
+     * 避免补偿阈值贴着工作点造成极限环。 */
+    const float release_rpm = (abs_target * config->turn_breakaway_release_ratio >
+                               config->turn_breakaway_enter_rpm * 2.0f) ?
+                              abs_target * config->turn_breakaway_release_ratio :
+                              config->turn_breakaway_enter_rpm * 2.0f;
+    if (speed_rpm * (float)target_sign >= release_rpm)
+    {
+        control_breakaway_reset_wheel(manager, wheel);
+        return 0.0f;
+    }
+
+    if (manager->breakaway_engaged[wheel] == 0U)
+    {
+        if (control_abs(speed_rpm) > config->turn_breakaway_enter_rpm)
+        {
+            return 0.0f;
+        }
+        manager->breakaway_engaged[wheel] = 1U;
+        manager->breakaway_engaged_time_s[wheel] = 0.0f;
+    }
+    manager->breakaway_engaged_time_s[wheel] += dt_s;
+
+    /* 超时保护：持续 hold_time 仍没跟上目标，则线性衰减到 0，
+     * 防止拖滞轮长期被破静摩擦电流持续加压。 */
+    const float elapsed_s = manager->breakaway_engaged_time_s[wheel];
+    const float hold_s = config->turn_breakaway_hold_time_s;
+    const float taper_s = config->turn_breakaway_taper_time_s;
+    float time_scale = 1.0f;
+    if (elapsed_s > hold_s)
+    {
+        time_scale = (taper_s > 0.0f) ?
+                     control_limit(1.0f - (elapsed_s - hold_s) / taper_s, 0.0f, 1.0f) :
+                     0.0f;
+        if (time_scale <= 0.0f)
+        {
+            control_breakaway_reset_wheel(manager, wheel);
+            return 0.0f;
+        }
+    }
+
+    const float target_scale = control_limit(abs_target / config->turn_breakaway_target_rpm,
+                                             0.0f,
+                                             1.0f);
+    const float full_breakaway_a = (float)target_sign * config->turn_breakaway_current_a;
+    return (full_breakaway_a - rolling_friction_a) * target_scale * time_scale;
+}
+
+static float control_update_turn_sync(Chassis_Control_Manager_t *manager,
+                                      const Chassis_Control_Input_t *input,
+                                      uint8_t pure_turn,
+                                      float dt_s)
+{
+    if (pure_turn == 0U || manager->config.turn_sync_enabled == 0U)
+    {
+        manager->turn_sync_ratio = 1.0f;
+        return 1.0f;
+    }
+
+    float min_follow_ratio = 1.0f;
+    uint8_t active_count = 0U;
+    for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        const float abs_target = control_abs(input->target_rpm[i]);
+        if (abs_target > manager->config.command_deadband_rpm)
+        {
+            const float follow_ratio = control_limit(
+                control_abs(input->speed_rpm[i]) / fmaxf(abs_target, 10.0f),
+                0.0f,
+                1.0f);
+            if (follow_ratio < min_follow_ratio)
+            {
+                min_follow_ratio = follow_ratio;
+            }
+            active_count++;
+        }
+    }
+    if (active_count == 0U)
+    {
+        manager->turn_sync_ratio = 1.0f;
+        return 1.0f;
+    }
+
+    const float response = (manager->config.turn_sync_time_s > 0.0f) ?
+                           control_limit(dt_s / manager->config.turn_sync_time_s, 0.0f, 1.0f) :
+                           1.0f;
+    manager->turn_sync_ratio += (min_follow_ratio - manager->turn_sync_ratio) * response;
+    manager->turn_sync_ratio = control_limit(manager->turn_sync_ratio,
+                                             manager->config.turn_sync_min_ratio,
+                                             1.0f);
+    return manager->turn_sync_ratio;
+}
+
+static uint8_t control_update_slip_limit(Chassis_Control_Manager_t *manager,
+                                         uint8_t wheel,
+                                         float target_rpm,
+                                         float speed_rpm,
+                                         float dt_s)
+{
+    const Chassis_Control_Config_t *config = &manager->config;
+    const float target_mag = control_abs(target_rpm);
+    if (target_mag <= config->command_deadband_rpm)
+    {
+        manager->drive_slip_elapsed_s[wheel] = 0.0f;
+        manager->drive_slip_limited[wheel] = 0U;
+        return 0U;
+    }
+
+    const float follow_ratio = control_abs(speed_rpm) / fmaxf(target_mag, 10.0f);
+    if (follow_ratio >= 1.0f - config->drive_slip_recover_ratio)
+    {
+        manager->drive_slip_elapsed_s[wheel] = 0.0f;
+        manager->drive_slip_limited[wheel] = 0U;
+    }
+    else if (follow_ratio <= 1.0f - config->drive_slip_error_ratio)
+    {
+        manager->drive_slip_elapsed_s[wheel] += dt_s;
+    }
+
+    if (manager->drive_slip_elapsed_s[wheel] >= config->drive_slip_confirm_time_s)
+    {
+        manager->drive_slip_limited[wheel] = 1U;
+    }
+    return manager->drive_slip_limited[wheel];
+}
+
 static void control_compute_drive(Chassis_Control_Manager_t *manager,
                                   const Chassis_Control_Input_t *input,
                                   float dt_s,
@@ -322,13 +490,21 @@ static void control_compute_drive(Chassis_Control_Manager_t *manager,
 {
     const uint8_t pure_turn = control_is_pure_turn(manager, input);
     const float pitch_current_a = control_pitch_feedforward(manager, input->pitch_rad);
+    const float sync_ratio = control_update_turn_sync(manager, input, pure_turn, dt_s);
 
     for (uint8_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
+        const float effective_target_rpm = input->target_rpm[i] * sync_ratio;
+        const uint8_t slip_limited = control_update_slip_limit(manager,
+                                                               (uint8_t)i,
+                                                               effective_target_rpm,
+                                                               input->speed_rpm[i],
+                                                               dt_s);
         const Chassis_Mit_Input_t motor_input = {
-            .target_rpm = input->target_rpm[i],
+            .target_rpm = effective_target_rpm,
             .speed_rpm = input->speed_rpm[i],
             .position_deg = input->position_deg[i],
+            .slip_limited = slip_limited,
         };
         Chassis_Mit_Output_t motor_output;
         float drive_current_a = Chassis_Mit_Update(&manager->drive_state[i],
@@ -336,27 +512,15 @@ static void control_compute_drive(Chassis_Control_Manager_t *manager,
                                                     &motor_input,
                                                     dt_s,
                                                     &motor_output);
-        if (pure_turn != 0U &&
-            manager->config.turn_breakaway_current_a > 0.0f &&
-            manager->config.turn_breakaway_target_rpm > 0.0f &&
-            manager->config.turn_breakaway_speed_rpm > 0.0f)
+        if (slip_limited == 0U && pure_turn != 0U &&
+            manager->config.turn_breakaway_current_a > 0.0f)
         {
-            const float target_scale = control_limit(
-                control_abs(input->target_rpm[i]) / manager->config.turn_breakaway_target_rpm,
-                0.0f,
-                1.0f);
-            const float speed_scale = 1.0f - control_limit(
-                control_abs(input->speed_rpm[i]) / manager->config.turn_breakaway_speed_rpm,
-                0.0f,
-                1.0f);
-            const float full_friction_current_a =
-                (float)control_sign(input->target_rpm[i]) *
-                manager->config.turn_breakaway_current_a;
-            const float friction_correction_a =
-                (full_friction_current_a - motor_output.friction_current_a) *
-                target_scale * speed_scale;
-            drive_current_a += friction_correction_a;
-            motor_output.friction_current_a += friction_correction_a;
+            drive_current_a += control_turn_breakaway_correction(manager,
+                                                                 (uint8_t)i,
+                                                                 effective_target_rpm,
+                                                                 input->speed_rpm[i],
+                                                                 motor_output.friction_current_a,
+                                                                 dt_s);
         }
 
         output->raw_current_a[i] = control_limit(drive_current_a + pitch_current_a,

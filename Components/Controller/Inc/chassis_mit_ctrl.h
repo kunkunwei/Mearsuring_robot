@@ -9,6 +9,7 @@ typedef struct
     float speed_kd_a_per_rpm;
     float speed_ki_a_per_rpm_s;
     float speed_integral_limit_a;
+    float speed_error_current_limit_a; /* 速度误差通道(kd+积分)独立限幅，A；0=退化为 current_limit */
     float friction_current_a;
     float friction_rpm_scale;
     float position_error_limit_deg;
@@ -28,6 +29,7 @@ typedef struct
     float target_rpm;
     float speed_rpm;
     float position_deg;
+    uint8_t slip_limited;
 } Chassis_Mit_Input_t;
 
 typedef struct
@@ -35,6 +37,7 @@ typedef struct
     float position_error_deg;
     float position_current_a;
     float speed_current_a;
+    float speed_channel_current_a;
     float speed_integral_current_a;
     float friction_current_a;
     float raw_current_a;
