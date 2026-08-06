@@ -1,163 +1,157 @@
-# Chassis UART/USB Protocol
+# 底盘通信协议（v3.0）
 
-This document describes the binary protocol between the STM32F407 chassis controller and the Raspberry Pi/ROS host.
+本文档描述 STM32F407 底盘与树莓派上位机之间的二进制通信协议，与 `codex/v3.0` 固件一致。
 
-The transport is currently USB CDC. Later it will move to USART6 UART. The frame format is unchanged.
+## 传输方式
 
-## Common Rules
+- 当前：**USART6，115200 8N1，无流控**，经 CP2102N USB-UART 转接接入树莓派。
+- 保留：USB CDC 虚拟串口打包接口（`MiniPC_SendChassisOdomUSB`），帧格式完全相同，后续可直接切换。
 
-- Byte order: little-endian
-- Float format: IEEE-754 `float32`
-- Header: `0x42`
-- Checksum: unsigned 8-bit sum of all previous bytes in the frame
-- Invalid frames are ignored
+## 通用规则
 
-Checksum example:
+- 字节序：小端（little-endian）。
+- 浮点：IEEE-754 `float32`。
+- 帧头：`0x42`。
+- 校验和：**帧内除最后一个字节外所有字节的 8 位累加和**，存放在最后一字节。
+- 无效帧直接丢弃，不影响后续解析。
 
 ```c
 uint8_t checksum = 0;
-for (int i = 0; i < frame_len - 1; i++) {
+for (uint8_t i = 0; i < frame_len - 1; i++) {
     checksum += frame[i];
 }
 ```
 
-## Host To STM32: Velocity Command
+## 坐标系约定
 
-The ROS host sends desired chassis velocity in the robot local frame.
+- 车体坐标系：X 向前、Y 向左、Z 向上。
+- `vx`：m/s，前进为正。
+- `wz` / `yaw`：rad/s / rad，逆时针为正。
+- `pitch`：rad，车头抬起（上坡）为负；帧内为**修正后**值（平地≈0）。
+- `roll`：rad，原始值。
 
-Coordinate convention:
+## 帧 1：速度指令（上位机 → 底盘）
 
-- `+vx`: forward
-- `+wz`: counter-clockwise yaw
-- Unit of `vx`: m/s
-- Unit of `wz`: rad/s
+地址 `0x31`，长度 12 字节。
 
-Frame length: `12` bytes
+| 偏移 | 长度 | 类型 | 内容 |
+|---:|---:|---|---|
+| 0 | 1 | uint8 | 帧头 `0x42` |
+| 1 | 1 | uint8 | 地址 `0x31` |
+| 2 | 1 | uint8 | 长度 `12` |
+| 3 | 4 | float32 | `vx`，m/s |
+| 7 | 4 | float32 | `wz`，rad/s |
+| 11 | 1 | uint8 | 校验和（字节 0..10 累加） |
 
-| Offset | Size | Type    | Name     | Description |
-|--------|------|---------|----------|-------------|
-| 0      | 1    | uint8   | header   | `0x42` |
-| 1      | 1    | uint8   | address  | `0x31` |
-| 2      | 1    | uint8   | length   | `12` |
-| 3      | 4    | float32 | vx       | desired forward speed |
-| 7      | 4    | float32 | wz       | desired yaw rate |
-| 11     | 1    | uint8   | checksum | sum of bytes 0..10 |
+底盘侧 500 ms 未收到有效指令则强制 `vx=0`、`wz=0`。
 
-The STM32 command timeout is `500 ms`. If no valid command is received within this window, `vx` and `wz` are forced to zero.
+## 帧 2：分段清零（上位机 → 底盘）
 
-## STM32 To Host: Odometry Feedback
+地址 `0x33`，长度 6 字节。
 
-The STM32 sends chassis odometry and measured speed.
+| 偏移 | 长度 | 类型 | 内容 |
+|---:|---:|---|---|
+| 0 | 1 | uint8 | 帧头 `0x42` |
+| 1 | 1 | uint8 | 地址 `0x33` |
+| 2 | 1 | uint8 | 长度 `6` |
+| 3 | 1 | uint8 | 命令 `0x01` |
+| 4 | 1 | uint8 | `segment_id` |
+| 5 | 1 | uint8 | 校验和 |
 
-Frame length: `36` bytes
+### 分段清零流程（应对上坡打滑、过路口拐弯的累计误差）
 
-| Offset | Size | Type    | Name     | Description |
-|--------|------|---------|----------|-------------|
-| 0      | 1    | uint8   | header   | `0x42` |
-| 1      | 1    | uint8   | address  | `0x32` |
-| 2      | 1    | uint8   | length   | `36` |
-| 3      | 4    | float32 | x        | odom X, m |
-| 7      | 4    | float32 | y        | odom Y, m |
-| 11     | 4    | float32 | yaw      | heading, rad |
-| 15     | 4    | float32 | distance | signed forward distance, m |
-| 19     | 4    | float32 | vx       | estimated forward speed, m/s |
-| 23     | 4    | float32 | wz       | measured yaw rate, rad/s |
-| 27     | 2    | uint16  | ecd_0    | motor 0 encoder raw value, 0..8191 |
-| 29     | 2    | uint16  | ecd_1    | motor 1 encoder raw value, 0..8191 |
-| 31     | 2    | uint16  | ecd_2    | motor 2 encoder raw value, 0..8191 |
-| 33     | 2    | uint16  | ecd_3    | motor 3 encoder raw value, 0..8191 |
-| 35     | 1    | uint8   | checksum | sum of bytes 0..34 |
+1. 导航记录当前段的最终 `x`、`y`、`distance`。
+2. 导航生成新的 `segment_id`，发送 `0x33` 清零帧。
+3. 在 `0x32` 里程计反馈帧中等待 `segment_id` 等于新 ID。
+4. 确认后，将反馈中的 `x`、`y`、`distance` 作为新段起点，导航自行累计各段里程。
+5. **确认前可重复发送同一个 ID**，底盘对同一个新 ID 只应用一次，不会重复清零。
 
-Current STM32 send period: `10 ms` / `100 Hz`.
+清零只重置位置/距离累计和轮位置原点，INS yaw、磁航向和航向滤波器保持连续。
 
-## Python Reference
+## 帧 3：里程计反馈（底盘 → 上位机）
 
-### Pack Velocity Command
+地址 `0x32`，长度 **59 字节（0x3B）**，发送周期 10 ms（100 Hz）。
+
+| 偏移 | 长度 | 类型 | 内容 |
+|---:|---:|---|---|
+| 0 | 1 | uint8 | 帧头 `0x42` |
+| 1 | 1 | uint8 | 地址 `0x32` |
+| 2 | 1 | uint8 | 长度 `59` |
+| 3 | 4 | float32 | `x`，m |
+| 7 | 4 | float32 | `y`，m |
+| 11 | 4 | float32 | `yaw`，rad |
+| 15 | 4 | float32 | `distance`，有符号前进距离，m |
+| 19 | 4 | float32 | `vx`，估计前进速度，m/s |
+| 23 | 4 | float32 | `wz`，估计 yaw 角速度，rad/s |
+| 27 | 4 | float32 | `pitch`，修正后俯仰角，rad（平地≈0，上坡为负） |
+| 31 | 4 | float32 | `roll`，横滚角，rad |
+| 35 | 4 | float32 | 电机 1 连续角度，deg |
+| 39 | 4 | float32 | 电机 2 连续角度，deg |
+| 43 | 4 | float32 | 电机 3 连续角度，deg |
+| 47 | 4 | float32 | 电机 4 连续角度，deg |
+| 51 | 2 | uint16 | 左超声波距离，mm |
+| 53 | 2 | uint16 | 右超声波距离，mm |
+| 55 | 1 | uint8 | 左超声波在线状态 |
+| 56 | 1 | uint8 | 右超声波在线状态 |
+| 57 | 1 | uint8 | 已执行的 `segment_id` |
+| 58 | 1 | uint8 | 校验和（字节 0..57 累加） |
+
+### pitch 的斜坡判断用法
+
+`pitch` 在 STM32 侧使用与底盘斜坡补偿**同一个零偏**（`hold.pitch_zero_offset_rad`），因此：
+
+- 平地读数 ≈ 0 rad；
+- 上坡（车头抬起）为负，与控制器重力前馈符号一致；
+- 导航可用 `|pitch| > 5°` 判定需要位置补偿的大坡，`|pitch| < 3°` 判定平地。
+
+> 注意：v3.0 将 INS 角度统一转换为车体系后，该零偏需要在平地上重新标定（见调参文档）。
+
+## Python 参考实现（59 字节）
 
 ```python
 import struct
 
 HEADER = 0x42
-ADDR_CHASSIS_CMD = 0x31
-LEN_CHASSIS_CMD = 12
+ADDR_CMD = 0x31
+ADDR_ODOM = 0x32
+ADDR_RESET = 0x33
+LEN_CMD = 12
+LEN_ODOM = 59
+LEN_RESET = 6
+ODOM_FORMAT = "<BBBffffffffffffHHBBBB"
 
 def checksum_u8(data: bytes) -> int:
     return sum(data) & 0xFF
 
-def pack_cmd(vx: float, wz: float) -> bytes:
-    frame = struct.pack("<BBBff", HEADER, ADDR_CHASSIS_CMD, LEN_CHASSIS_CMD, vx, wz)
+def pack_command(vx: float, wz: float) -> bytes:
+    frame = struct.pack("<BBBff", HEADER, ADDR_CMD, LEN_CMD, vx, wz)
     return frame + bytes([checksum_u8(frame)])
-```
 
-### Decode Odometry Feedback
-
-```python
-import struct
-
-HEADER = 0x42
-ADDR_CHASSIS_ODOM = 0x32
-LEN_CHASSIS_ODOM = 36
-
-def checksum_u8(data: bytes) -> int:
-    return sum(data) & 0xFF
+def pack_odom_reset(segment_id: int) -> bytes:
+    frame = bytes((HEADER, ADDR_RESET, LEN_RESET, 0x01, segment_id))
+    return frame + bytes([checksum_u8(frame)])
 
 def unpack_odom(frame: bytes):
-    if len(frame) != LEN_CHASSIS_ODOM:
+    if len(frame) != LEN_ODOM:
         raise ValueError("bad odom frame length")
-    if frame[0] != HEADER or frame[1] != ADDR_CHASSIS_ODOM or frame[2] != LEN_CHASSIS_ODOM:
+    if frame[0] != HEADER or frame[1] != ADDR_ODOM or frame[2] != LEN_ODOM:
         raise ValueError("bad odom frame header")
     if checksum_u8(frame[:-1]) != frame[-1]:
         raise ValueError("bad odom checksum")
-
-    _, _, _, x, y, yaw, distance, vx, wz, ecd0, ecd1, ecd2, ecd3, _ = struct.unpack("<BBBffffffHHHHB", frame)
+    v = struct.unpack(ODOM_FORMAT, frame)
     return {
-        "x": x,
-        "y": y,
-        "yaw": yaw,
-        "distance": distance,
-        "vx": vx,
-        "wz": wz,
-        "motor_ecd": [ecd0, ecd1, ecd2, ecd3],
+        "x": v[3], "y": v[4], "yaw": v[5], "distance": v[6],
+        "vx": v[7], "wz": v[8], "pitch_rad": v[9], "roll_rad": v[10],
+        "motor_pos_deg": v[11:15],
+        "us_left_mm": v[15], "us_right_mm": v[16],
+        "us_left_online": v[17], "us_right_online": v[18],
+        "segment_id": v[19],
     }
 ```
 
-## Transport Notes
+## ROS 映射建议
 
-### Current USB CDC
-
-Send the command frame bytes to the STM32 USB virtual serial port. Read odometry frames from the same port.
-
-Recommended serial settings are not meaningful for USB CDC, but most host tools still accept:
-
-- baudrate: `115200`
-- data bits: `8`
-- parity: none
-- stop bits: `1`
-
-### Later USART6 UART
-
-Use the same frame bytes over UART6.
-
-STM32 USART6 settings:
-
-- baudrate: `115200`
-- data bits: `8`
-- parity: none
-- stop bits: `1`
-- flow control: none
-
-## ROS Mapping
-
-Suggested ROS topic mapping:
-
-- Subscribe `/cmd_vel`
-  - `linear.x -> vx`
-  - `angular.z -> wz`
-- Publish `/odom`
-  - `pose.pose.position.x -> x`
-  - `pose.pose.position.y -> y`
-  - `yaw -> pose.pose.orientation`
-  - `twist.twist.linear.x -> vx`
-  - `twist.twist.angular.z -> wz`
-
-The STM32 local frame is `X forward, Y left, Z up`, with positive yaw counter-clockwise.
+- 订阅 `/cmd_vel`：`linear.x -> vx`，`angular.z -> wz`。
+- 发布 `/odom`：`x/y/yaw` → 位姿，`vx/wz` → 速度，`yaw` → 四元数。
+- 发布倾斜话题（如 `imu_tilt`）：`pitch_rad`、`roll_rad` 用于斜坡判断。
+- 分段清零：发布 `odom_reset_segment`（UInt8），等待 `odom_segment_id` 与请求一致。
