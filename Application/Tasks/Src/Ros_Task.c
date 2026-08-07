@@ -58,7 +58,7 @@ void Ros_Task(void const *argument)
                 .segment_id = odom->segment_id,
             };
 
-            (void)MiniPC_SendChassisOdomUART(&huart6, &tx_odom);
+            // (void)MiniPC_SendChassisOdomUART(&huart6, &tx_odom);
         }
 
         osDelayUntil(&systick, ROS_TASK_PERIOD_MS);

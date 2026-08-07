@@ -102,7 +102,7 @@ void User_Task(void const *argument)
         // Vofa_Process_RxCommand();
         // User_Ultrasonic_DebugPrint();
         // Vofa_Send_Brake_Debug_Info(&huart6, get_chassis_control_point());
-        // (void)Vofa_Send_ChassisPipeline_Debug(&huart6, get_chassis_control_point());
+        (void)Vofa_Send_ChassisPipeline_Debug(&huart6, get_chassis_control_point());
         // Vofa_Send_Ultrasonic_Info(&huart6,
                                   // &ultrasonic_left,
                                   // &ultrasonic_right,

@@ -5,6 +5,7 @@
 #include "remote_control.h"
 #include "observe_task.h"
 #include "minipc.h"
+#include <math.h>
 // ============================================================
 #include "monitor.h"
 #include "mymotor.h"
@@ -22,6 +23,13 @@
             (output) = 0;                                \
         }                                                \
     }
+
+// 上电后先等待INS姿态解算收敛，单位ms
+#define CHASSIS_PITCH_ZERO_SETTLE_TIME_MS 1000U
+// 在平地静止状态下采集Pitch平均值的时长，单位ms
+#define CHASSIS_PITCH_ZERO_SAMPLE_TIME_MS 1000U
+// Pitch零点采样周期，单位ms
+#define CHASSIS_PITCH_ZERO_SAMPLE_PERIOD_MS 2U
 
 // 闄愬箙鍑芥暟
 fp32 fp32_constrain(fp32 Value, fp32 minValue, fp32 maxValue)
@@ -117,6 +125,7 @@ bool chassis_get_current_command(Chassis_Current_Command_t *command, uint32_t no
 }
 
 static void chassis_init(chassis_move_t *chassis_move_init);
+static void chassis_calibrate_pitch_zero(chassis_move_t *chassis_move_calibrate);
 void chassis_set_mode(chassis_move_t *chassis_move_mode);
 void chassis_mode_change_control_transit(chassis_move_t *chassis_move_transit);
 static void chassis_feedback_update(chassis_move_t *chassis_move_update);
@@ -134,6 +143,11 @@ void Chassis_Task(void const *argument)
     TickType_t systick = 0;
 
     chassis_init(&chassis_move);
+
+    // 在允许CAN控制任务运行前完成本次上电的平地Pitch零点采样
+    chassis_calibrate_pitch_zero(&chassis_move);
+
+    // Pitch零点采样结束后，才允许其他任务访问并控制底盘
     chassis_init_done=true;
 
     for (;;)
@@ -148,6 +162,57 @@ void Chassis_Task(void const *argument)
         osDelayUntil(&systick, CHASSIS_CONTROL_TIME_MS);
     }
     /* USER CODE END Chassis_Task */
+}
+
+/**
+ * @brief 上电后在平地静止状态下采集Pitch平均值，作为本次运行的零点
+ * @param chassis_move_calibrate 底盘控制结构体指针
+ */
+static void chassis_calibrate_pitch_zero(chassis_move_t *chassis_move_calibrate)
+{
+    // 如果底盘结构体或INS角度指针无效，则保留默认的固定Pitch零偏
+    if (chassis_move_calibrate == NULL || chassis_move_calibrate->chassis_INS_angle == NULL)
+    {
+        return;
+    }
+
+    // 校准期间持续保持控制管理器关闭，确保输出电流为零
+    Chassis_ControlManager_Disable(&chassis_move_calibrate->control_manager,
+                                   &chassis_move_calibrate->control_output);
+
+    // 等待INS滤波器和姿态解算先完成初始收敛
+    osDelay(CHASSIS_PITCH_ZERO_SETTLE_TIME_MS);
+
+    float pitch_sum_rad = 0.0f;
+    uint32_t valid_sample_count = 0U;
+    const uint32_t sample_start_tick = HAL_GetTick();
+
+    // 在规定采样时间内连续读取当前车体Pitch
+    while ((uint32_t)(HAL_GetTick() - sample_start_tick) < CHASSIS_PITCH_ZERO_SAMPLE_TIME_MS)
+    {
+        const float pitch_sample_rad =
+            *(chassis_move_calibrate->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET);
+
+        // 只累加有效浮点数，避免异常姿态数据污染平均值
+        if (isfinite(pitch_sample_rad))
+        {
+            pitch_sum_rad += pitch_sample_rad;
+            valid_sample_count++;
+        }
+
+        // 等待下一个采样周期，同时让INS任务继续更新姿态
+        osDelay(CHASSIS_PITCH_ZERO_SAMPLE_PERIOD_MS);
+    }
+
+    // 如果没有取得有效样本，则保留配置中的默认固定Pitch零偏
+    if (valid_sample_count == 0U)
+    {
+        return;
+    }
+
+    // 使用本次上电采样的Pitch平均值覆盖本次运行的零点
+    chassis_move_calibrate->control_manager.config.hold.pitch_zero_offset_rad =
+        pitch_sum_rad / (float)valid_sample_count;
 }
 
 /**
