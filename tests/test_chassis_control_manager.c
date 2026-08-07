@@ -487,6 +487,82 @@ static void test_drive_keeps_pitch_feedforward_on_slope(void)
     assert(output.raw_current_a[1] > 1.8f);
 }
 
+static void test_pitch_feedforward_deadband_zeroes_small_pitch_in_drive(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.drive.position_kp_a_per_deg = 0.0f;
+    config.drive.speed_kd_a_per_rpm = 0.0f;
+    config.drive.speed_ki_a_per_rpm_s = 0.0f;
+    config.drive.friction_current_a = 0.0f;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = 5.0f;
+    }
+
+    const float deg = 57.29577951308232f;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad + 2.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[0]) <= 1.0e-5f);
+
+    input.pitch_rad = config.hold.pitch_zero_offset_rad - 2.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[0]) <= 1.0e-5f);
+
+    input.pitch_rad = config.hold.pitch_zero_offset_rad + 3.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[0]) <= 1.0e-5f);
+
+    const float expected_ramp_a = 8.0f * sinf(4.0f / deg) * 0.5f;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad - 4.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[0] - expected_ramp_a) <= 0.01f);
+
+    const float expected_full_a = 8.0f * sinf(6.0f / deg);
+    input.pitch_rad = config.hold.pitch_zero_offset_rad - 6.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.raw_current_a[0] - expected_full_a) <= 0.01f);
+}
+
+static void test_pitch_feedforward_deadband_zeroes_small_pitch_in_hold(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.hold_enter_time_s = 0.005f;
+    config.hold.position_kp_a_per_deg = 0.0f;
+    config.hold.speed_kd_a_per_rpm = 0.0f;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    const float deg = 57.29577951308232f;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad + 2.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(output.state == CHASSIS_CTRL_HOLD);
+    assert(fabsf(output.feedforward_current_a[0]) <= 1.0e-5f);
+    assert(fabsf(output.current_a[0]) <= 1.0e-5f);
+
+    const float expected_ramp_a = 8.0f * sinf(4.0f / deg) * 0.5f;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad - 4.0f / deg;
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(fabsf(output.feedforward_current_a[0] - expected_ramp_a) <= 0.01f);
+}
+
 static void test_zero_command_brakes_before_hold(void)
 {
     Chassis_Control_Manager_t manager;
@@ -1131,6 +1207,8 @@ int main(void)
     test_pure_turn_sync_scales_all_wheels_to_slowest();
     test_drive_slip_limit_disables_dragging_wheel_tracking();
     test_drive_keeps_pitch_feedforward_on_slope();
+    test_pitch_feedforward_deadband_zeroes_small_pitch_in_drive();
+    test_pitch_feedforward_deadband_zeroes_small_pitch_in_hold();
     test_zero_command_brakes_before_hold();
     test_release_captures_position_and_compensates_pitch_during_brake();
     test_flat_brake_disables_position_compensation();

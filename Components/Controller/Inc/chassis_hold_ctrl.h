@@ -11,6 +11,8 @@ typedef struct
     float speed_kd_a_per_rpm;
     float pitch_feedforward_a;
     float pitch_zero_offset_rad;
+    float pitch_feedforward_deadband_rad;
+    float pitch_feedforward_full_rad;
     float current_limit_a;
 } Chassis_Hold_Config_t;
 
@@ -43,6 +45,8 @@ void Chassis_Hold_Capture(Chassis_Hold_State_t *state,
                           const float position_deg[CHASSIS_HOLD_MOTOR_COUNT]);
 float Chassis_Hold_CorrectPitch(const Chassis_Hold_Config_t *config,
                                 float raw_pitch_rad);
+float Chassis_Hold_PitchFeedforwardCurrent(const Chassis_Hold_Config_t *config,
+                                           float raw_pitch_rad);
 float Chassis_Hold_Update(Chassis_Hold_State_t *state,
                           const Chassis_Hold_Config_t *config,
                           const Chassis_Hold_Input_t *input,

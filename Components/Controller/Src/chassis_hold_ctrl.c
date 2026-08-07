@@ -68,6 +68,37 @@ float Chassis_Hold_CorrectPitch(const Chassis_Hold_Config_t *config,
     return raw_pitch_rad - config->pitch_zero_offset_rad;
 }
 
+float Chassis_Hold_PitchFeedforwardCurrent(const Chassis_Hold_Config_t *config,
+                                           float raw_pitch_rad)
+{
+    if (config == NULL)
+    {
+        return 0.0f;
+    }
+
+    const float corrected_pitch_rad = Chassis_Hold_CorrectPitch(config, raw_pitch_rad);
+    const float deadband_rad = config->pitch_feedforward_deadband_rad;
+    const float full_rad = config->pitch_feedforward_full_rad;
+    float scale = 1.0f;
+
+    /* 悬挂/颠簸会造成小幅 pitch 波动，死区内不给补偿电流；
+     * deadband 到 full 之间线性切入，避免台阶冲击。 */
+    if (deadband_rad > 0.0f)
+    {
+        const float abs_pitch = fabsf(corrected_pitch_rad);
+        if (abs_pitch <= deadband_rad)
+        {
+            scale = 0.0f;
+        }
+        else if (full_rad > deadband_rad && abs_pitch < full_rad)
+        {
+            scale = (abs_pitch - deadband_rad) / (full_rad - deadband_rad);
+        }
+    }
+
+    return config->pitch_feedforward_a * sinf(corrected_pitch_rad) * scale;
+}
+
 float Chassis_Hold_Update(Chassis_Hold_State_t *state,
                           const Chassis_Hold_Config_t *config,
                           const Chassis_Hold_Input_t *input,
@@ -90,7 +121,7 @@ float Chassis_Hold_Update(Chassis_Hold_State_t *state,
                                  (state->position_ref_deg - output->mean_position_deg);
     output->speed_current_a = -config->speed_kd_a_per_rpm * output->mean_speed_rpm;
     output->corrected_pitch_rad = Chassis_Hold_CorrectPitch(config, input->pitch_rad);
-    output->pitch_current_a = config->pitch_feedforward_a * sinf(output->corrected_pitch_rad);
+    output->pitch_current_a = Chassis_Hold_PitchFeedforwardCurrent(config, input->pitch_rad);
     output->raw_current_a = hold_limit(output->position_current_a +
                                        output->speed_current_a +
                                        output->pitch_current_a,

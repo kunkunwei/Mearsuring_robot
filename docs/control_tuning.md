@@ -54,6 +54,8 @@ fault：0=无，1=反馈丢失，2=超速，3=震荡，4=饱和，5=时序。
 | `speed_kd_a_per_rpm` | 0.010 | HOLD 速度阻尼 |
 | `pitch_feedforward_a` | -8.0 | 重力前馈系数：`电流 = k * sin(修正 pitch)`。上坡 pitch<0 得正向电流，用于坡上防止溜车 |
 | `pitch_zero_offset_rad` | 3.7° | 平地零偏。**v3.0 换轴后需在平地上重新标定**：调到此值使平地修正 pitch ≈ 0 |
+| `pitch_feedforward_deadband_rad` | 3.0° | **pitch 前馈死区**：修正 pitch 在 ±3° 内不给补偿电流（悬挂/颠簸导致的小幅 pitch 不会触发补偿） |
+| `pitch_feedforward_full_rad` | 5.0° | pitch 前馈在 3°~5° 之间线性切入，≥5° 全量，避免 3° 处台阶冲击 |
 | `current_limit_a` | 6.5 | HOLD 电流上限（驻坡时需要大于 DRIVE 上限） |
 
 ### 2.4 斜坡位置补偿（`brake_position_comp_*`）
