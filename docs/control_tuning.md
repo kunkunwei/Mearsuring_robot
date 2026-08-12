@@ -52,8 +52,8 @@ fault：0=无，1=反馈丢失，2=超速，3=震荡，4=饱和，5=时序。
 | --- | --- | --- |
 | `position_kp_a_per_deg` | 0.010 | 每轮位置闭环刚度，防止单轮在 HOLD 中空转 |
 | `speed_kd_a_per_rpm` | 0.010 | HOLD 速度阻尼 |
-| `pitch_feedforward_a` | -8.0 | 重力前馈系数：`电流 = k * sin(修正 pitch)`。上坡 pitch<0 得正向电流，用于坡上防止溜车 |
-| `pitch_zero_offset_rad` | 3.7° | 平地零偏。**v3.0 换轴后需在平地上重新标定**：调到此值使平地修正 pitch ≈ 0 |
+| `pitch_feedforward_a` | 8.0 | 重力前馈系数：`电流 = k * sin(修正 pitch)`。实车车头抬高时 pitch>0，因此产生正向电流辅助爬坡并防止溜车 |
+| `pitch_zero_offset_rad` | 上电采样值 | 平地静止上电时自动采集真实Pitch平均值，使平地修正 pitch ≈ 0 |
 | `current_limit_a` | 6.5 | HOLD 电流上限（驻坡时需要大于 DRIVE 上限） |
 
 ### 2.4 斜坡位置补偿（`brake_position_comp_*`）
@@ -178,12 +178,12 @@ fault：0=无，1=反馈丢失，2=超速，3=震荡，4=饱和，5=时序。
 | 16 | 诊断码 `state*100+fault*10+valid` |
 | 17 | CAN 发送丢帧计数 |
 | 18 | CAN 队列高水位 |
-| 19 | 修正后 pitch（deg） |
+| 19 | 修正后实车 pitch（deg，代码Roll减去上电Pitch零点） |
 
 ## 9. 实车调参顺序建议
 
 1. **先修机械**：导轮螺丝紧固、整车无松旷，否则数据不可信。
 2. 平地低速直行：确认四轮反馈转速一致、无抖动；`friction_current_a`/`speed_ki` 负责稳态静差，`speed_kd` 负责超调。
 3. 原地旋转：确认 odom yaw 方向与比例（v3.0 转弯为纯 IMU）；`turn_breakaway_current_a` 只影响起步破静摩擦，不应长期压在高转速轮上（超过 `turn_breakaway_speed_rpm` 自动退出）。
-4. 纵向驻坡：HOLD 进入后 pitch 为负、前馈为正电流、四轮各自锁位；重新标定 `pitch_zero_offset_rad`。
+4. 纵向驻坡：HOLD 进入后，上坡 pitch 为正、前馈为正电流、四轮各自锁位；确认上电时车辆在平地静止。
 5. 分段清零：上坡/过路口后发 `0x33` 帧，等待 `segment_id` 确认，再开始新段累计。

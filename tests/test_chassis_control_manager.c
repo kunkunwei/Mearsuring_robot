@@ -474,7 +474,7 @@ static void test_drive_keeps_pitch_feedforward_on_slope(void)
     Chassis_ControlManager_Init(&manager, &config);
 
     input.enabled = 1U;
-    input.pitch_rad = config.hold.pitch_zero_offset_rad -
+    input.pitch_rad = config.hold.pitch_zero_offset_rad +
                       14.0f / 57.29577951308232f;
     for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
     {
@@ -534,7 +534,8 @@ static void test_release_captures_position_and_compensates_pitch_during_brake(vo
         input.speed_rpm[i] = 20.0f;
         input.position_deg[i] = 12.0f;
     }
-    input.pitch_rad = -9.4f / 57.29577951308232f;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad +
+                      8.0f / 57.29577951308232f;
     Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
 
     assert(output.state == CHASSIS_CTRL_BRAKE);
@@ -585,8 +586,8 @@ static void test_flat_brake_disables_position_compensation(void)
 
 static void test_uphill_and_downhill_enable_brake_position_compensation(void)
 {
-    const float uphill_current = brake_position_current_for_pitch(-6.0f);
-    const float downhill_current = brake_position_current_for_pitch(6.0f);
+    const float uphill_current = brake_position_current_for_pitch(6.0f);
+    const float downhill_current = brake_position_current_for_pitch(-6.0f);
 
     assert(uphill_current < 0.0f);
     assert(downhill_current < 0.0f);
@@ -802,7 +803,7 @@ static void test_hold_damps_a_slipping_wheel_independently(void)
     Chassis_ControlManager_Init(&manager, &config);
 
     input.enabled = 1U;
-    input.pitch_rad = config.hold.pitch_zero_offset_rad -
+    input.pitch_rad = config.hold.pitch_zero_offset_rad +
                       15.0f / 57.29577951308232f;
     Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
     assert(output.state == CHASSIS_CTRL_HOLD);
@@ -841,23 +842,110 @@ static void test_pitch_offset_removes_flat_table_bias(void)
     assert(fabsf(output.current_a[0]) <= 1.0e-6f);
 }
 
+static void test_pitch_feedforward_uses_three_to_five_degree_smooth_deadband(void)
+{
+    Chassis_Control_Config_t config;
+    float corrected_pitch_rad = 0.0f;
+
+    Chassis_ControlManager_DefaultConfig(&config);
+
+    // 2°位于死区内，Pitch前馈必须完全关闭
+    const float deadband_current = Chassis_Hold_ComputePitchFeedforward(
+        &config.hold,
+        config.hold.pitch_zero_offset_rad + 2.0f / 57.29577951308232f,
+        &corrected_pitch_rad);
+    assert(fabsf(corrected_pitch_rad - 2.0f / 57.29577951308232f) <= 1.0e-6f);
+    assert(fabsf(deadband_current) <= 1.0e-6f);
+
+    // 4°位于3°到5°过渡区中点，Pitch前馈应为完整值的一半
+    const float transition_current = Chassis_Hold_ComputePitchFeedforward(
+        &config.hold,
+        config.hold.pitch_zero_offset_rad + 4.0f / 57.29577951308232f,
+        NULL);
+    const float transition_full_current =
+        config.hold.pitch_feedforward_a * sinf(4.0f / 57.29577951308232f);
+    assert(fabsf(transition_current - 0.5f * transition_full_current) <= 1.0e-6f);
+
+    // 5°达到完整启用阈值，Pitch前馈不得继续缩小
+    const float full_current = Chassis_Hold_ComputePitchFeedforward(
+        &config.hold,
+        config.hold.pitch_zero_offset_rad + 5.0f / 57.29577951308232f,
+        NULL);
+    const float expected_full_current =
+        config.hold.pitch_feedforward_a * sinf(5.0f / 57.29577951308232f);
+    assert(fabsf(full_current - expected_full_current) <= 1.0e-6f);
+}
+
+static void test_pitch_feedforward_deadband_applies_to_drive_brake_and_hold(void)
+{
+    Chassis_Control_Config_t config;
+    Chassis_Control_Manager_t manager;
+    Chassis_Control_Output_t output;
+    Chassis_Control_Input_t input = valid_input();
+
+    Chassis_ControlManager_DefaultConfig(&config);
+    config.drive.position_kp_a_per_deg = 0.0f;
+    config.drive.speed_kd_a_per_rpm = 0.0f;
+    config.drive.speed_ki_a_per_rpm_s = 0.0f;
+    config.drive.friction_current_a = 0.0f;
+    config.brake.speed_gain_a_per_rpm = 0.0f;
+    config.hold.position_kp_a_per_deg = 0.0f;
+    config.hold.speed_kd_a_per_rpm = 0.0f;
+    config.hold_enter_time_s = 0.005f;
+    config.current_rise_a_per_s = 1000.0f;
+    config.current_release_a_per_s = 1000.0f;
+    Chassis_ControlManager_Init(&manager, &config);
+
+    input.enabled = 1U;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad +
+                      2.0f / 57.29577951308232f;
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = 5.0f;
+    }
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(output.state == CHASSIS_CTRL_DRIVE);
+    assert(fabsf(output.feedforward_current_a[0]) <= 1.0e-6f);
+
+    // 摇杆回中且轮速仍较高时进入BRAKE，死区内仍不得产生Pitch前馈
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.target_rpm[i] = 0.0f;
+        input.speed_rpm[i] = 20.0f;
+    }
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(output.state == CHASSIS_CTRL_BRAKE);
+    assert(fabsf(output.feedforward_current_a[0]) <= 1.0e-6f);
+
+    // 轮速降为零后进入HOLD，死区内同样不得产生Pitch前馈
+    for (size_t i = 0U; i < CHASSIS_CONTROL_MOTOR_COUNT; i++)
+    {
+        input.speed_rpm[i] = 0.0f;
+    }
+    Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
+    assert(output.state == CHASSIS_CTRL_HOLD);
+    assert(fabsf(output.feedforward_current_a[0]) <= 1.0e-6f);
+}
+
 static void test_pitch_offset_preserves_real_uphill_angle(void)
 {
     Chassis_Hold_Config_t config = {
-        .pitch_feedforward_a = -10.0f,
+        .pitch_feedforward_a = 10.0f,
         .pitch_zero_offset_rad = 3.7f / 57.29577951308232f,
+        .pitch_feedforward_off_pitch_rad = 3.0f / 57.29577951308232f,
+        .pitch_feedforward_full_pitch_rad = 5.0f / 57.29577951308232f,
         .current_limit_a = 10.0f,
     };
     Chassis_Hold_State_t state = {0};
     Chassis_Hold_Input_t input = {
-        .pitch_rad = -9.4f / 57.29577951308232f,
+        .pitch_rad = (3.7f + 13.1f) / 57.29577951308232f,
     };
     Chassis_Hold_Output_t output;
 
     Chassis_Hold_Update(&state, &config, &input, &output);
 
     assert(fabsf(output.corrected_pitch_rad -
-                 (-13.1f / 57.29577951308232f)) <= 1.0e-6f);
+                 (13.1f / 57.29577951308232f)) <= 1.0e-6f);
     assert(output.pitch_current_a > 0.0f);
 }
 
@@ -1047,14 +1135,14 @@ static void test_pitch_feedforward_saturation_does_not_latch_fault(void)
     config.hold_enter_time_s = 0.005f;
     config.hold.position_kp_a_per_deg = 0.0f;
     config.hold.speed_kd_a_per_rpm = 0.0f;
-    config.hold.pitch_feedforward_a = -10.0f;
+    config.hold.pitch_feedforward_a = 10.0f;
     config.hold.current_limit_a = 0.5f;
     config.current_rise_a_per_s = 1000.0f;
     config.current_release_a_per_s = 1000.0f;
     Chassis_ControlManager_Init(&manager, &config);
 
     input.enabled = 1U;
-    input.pitch_rad = -1.57079632679f;
+    input.pitch_rad = config.hold.pitch_zero_offset_rad + 1.57079632679f;
     for (size_t step = 0U; step < 30U; step++)
     {
         Chassis_ControlManager_Update(&manager, &input, 0.005f, &output);
@@ -1146,6 +1234,8 @@ int main(void)
     test_hold_closes_each_wheel_position_independently();
     test_hold_damps_a_slipping_wheel_independently();
     test_pitch_offset_removes_flat_table_bias();
+    test_pitch_feedforward_uses_three_to_five_degree_smooth_deadband();
+    test_pitch_feedforward_deadband_applies_to_drive_brake_and_hold();
     test_pitch_offset_preserves_real_uphill_angle();
     test_brief_hold_overspeed_does_not_latch_fault();
     test_sustained_hold_overspeed_latches_fault();

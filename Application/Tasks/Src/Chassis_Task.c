@@ -187,11 +187,11 @@ static void chassis_calibrate_pitch_zero(chassis_move_t *chassis_move_calibrate)
     uint32_t valid_sample_count = 0U;
     const uint32_t sample_start_tick = HAL_GetTick();
 
-    // 在规定采样时间内连续读取当前车体Pitch
+    // 当前代码中的Roll轴对应实车Pitch，因此从Roll索引采集真实Pitch零点
     while ((uint32_t)(HAL_GetTick() - sample_start_tick) < CHASSIS_PITCH_ZERO_SAMPLE_TIME_MS)
     {
         const float pitch_sample_rad =
-            *(chassis_move_calibrate->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET);
+            *(chassis_move_calibrate->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET);
 
         // 只累加有效浮点数，避免异常姿态数据污染平均值
         if (isfinite(pitch_sample_rad))
@@ -594,8 +594,9 @@ void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
     }
     Chassis_Control_Input_t control_input = {
         .enabled = 1U,
+        // 当前代码中的Roll轴对应实车Pitch，因此控制补偿读取Roll索引
         .pitch_rad = (chassis_move_control_loop->chassis_INS_angle != NULL) ?
-                     *(chassis_move_control_loop->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET) :
+                     *(chassis_move_control_loop->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET) :
                      0.0f,
     };
 

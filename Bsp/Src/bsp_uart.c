@@ -304,13 +304,13 @@ void USER_USART6_RxHandler(UART_HandleTypeDef *huart, uint16_t Size)
 	if (((((DMA_Stream_TypeDef *)huart->hdmarx->Instance)->CR) & DMA_SxCR_CT) == RESET)
 	{
 		__HAL_DMA_DISABLE(huart->hdmarx);
-		rx_buf = USART6_MiniPC_Buf[1];
+		rx_buf = USART6_MiniPC_Buf[0];
 		huart->hdmarx->Instance->CR |= DMA_SxCR_CT;
 	}
 	else
 	{
 		__HAL_DMA_DISABLE(huart->hdmarx);
-		rx_buf = USART6_MiniPC_Buf[0];
+		rx_buf = USART6_MiniPC_Buf[1];
 		huart->hdmarx->Instance->CR &= ~(DMA_SxCR_CT);
 	}
 

@@ -219,7 +219,10 @@ static void BuildOdomInput(const chassis_move_t *chassis, OdomInput_t *input)
     if (chassis->chassis_INS_angle != NULL)
     {
         input->imu.yaw_rad = *(chassis->chassis_INS_angle + INS_YAW_ADDRESS_OFFSET);
-        input->imu.pitch_rad = *(chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET);
+        // 里程计坡度判断使用与底盘控制一致的修正后真实Pitch
+        input->imu.pitch_rad = Chassis_Hold_CorrectPitch(
+            &chassis->control_manager.config.hold,
+            *(chassis->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET));
         input->imu.yaw_ready = 1U;
     }
 
@@ -268,8 +271,12 @@ static void UpdateOdometry(const OdomOutput_t *output, uint8_t magnetic_sample_u
                 ist8310_Info.raw_mag[1],
                 ist8310_Info.raw_mag[2],
             },
-            .roll_rad = *(local_chassis_move->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET),
-            .pitch_rad = *(local_chassis_move->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET),
+            // 代码中的Pitch对应实车Roll，供磁航向执行横滚倾斜补偿
+            .roll_rad = *(local_chassis_move->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET),
+            // 代码中的Roll对应实车Pitch，并使用上电零点修正纵向倾角
+            .pitch_rad = Chassis_Hold_CorrectPitch(
+                &local_chassis_move->control_manager.config.hold,
+                *(local_chassis_move->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET)),
             .predicted_yaw_rad = output->heading_rad,
             .dt_s = MAGNETOMETER_UPDATE_PERIOD_MS / 1000.0f,
             .sample_valid = 1U,

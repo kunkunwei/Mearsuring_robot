@@ -153,5 +153,5 @@ def unpack_odom(frame: bytes):
 
 - 订阅 `/cmd_vel`：`linear.x -> vx`，`angular.z -> wz`。
 - 发布 `/odom`：`x/y/yaw` → 位姿，`vx/wz` → 速度，`yaw` → 四元数。
-- 发布倾斜话题（如 `imu_tilt`）：`pitch_rad`、`roll_rad` 用于斜坡判断。
+- 发布倾斜话题（如 `imu_tilt`）：`pitch_rad` 为减去上电零点后的实车纵向俯仰角，车头抬高为正；`roll_rad` 为实车横滚角。
 - 分段清零：发布 `odom_reset_segment`（UInt8），等待 `odom_segment_id` 与请求一致。

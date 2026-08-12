@@ -37,13 +37,15 @@ void Ros_Task(void const *argument)
                 .distance = odom->distance,
                 .vx = odom->vx,
                 .wz = odom->wz,
+                // 代码中的Roll对应实车Pitch，ROS发送与底盘控制一致的修正后Pitch
                 .pitch_rad = (local_chassis->chassis_INS_angle != NULL) ?
                              Chassis_Hold_CorrectPitch(
                                  &local_chassis->control_manager.config.hold,
-                                 *(local_chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET)) :
+                                 *(local_chassis->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET)) :
                              0.0f,
+                // 代码中的Pitch对应实车Roll，暂时直接发送该原始角度
                 .roll_rad = (local_chassis->chassis_INS_angle != NULL) ?
-                            *(local_chassis->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET) :
+                            *(local_chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET) :
                             0.0f,
                 .motor_pos_deg = {
                     local_chassis->chassis_motor[0].pos_deg,
@@ -58,7 +60,7 @@ void Ros_Task(void const *argument)
                 .segment_id = odom->segment_id,
             };
 
-            // (void)MiniPC_SendChassisOdomUART(&huart6, &tx_odom);
+            (void)MiniPC_SendChassisOdomUART(&huart6, &tx_odom);
         }
 
         osDelayUntil(&systick, ROS_TASK_PERIOD_MS);

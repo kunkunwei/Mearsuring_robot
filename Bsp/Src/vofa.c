@@ -469,7 +469,7 @@ HAL_StatusTypeDef Vofa_Send_ChassisPipeline_Debug(UART_HandleTypeDef *huart,
 
     /* target rpm[0..3], feedback rpm[4..7], CAN snapshot current[8..11],
        ESC feedback current[12..15], state/fault/valid code[16],
-       CAN TX dropped count[17], queue high watermark[18], corrected pitch deg[19]. */
+       CAN TX dropped count[17], queue high watermark[18], corrected real pitch deg[19]. */
     Vofa_ChassisPipelineFrame_t frame = {
         .data = {
             chassis->chassis_motor[0].speed_set_rpm,
@@ -495,10 +495,11 @@ HAL_StatusTypeDef Vofa_Send_ChassisPipeline_Debug(UART_HandleTypeDef *huart,
             diagnostic_code,
             (float)BSP_CAN_GetTxQueueDropped(),
             (float)BSP_CAN_GetTxQueueHighWatermark(),
+            // 代码中的Roll对应实车Pitch，减去上电零点后发送控制器使用的修正Pitch
             (chassis->chassis_INS_angle != NULL) ?
                 Chassis_Hold_CorrectPitch(
                     &chassis->control_manager.config.hold,
-                    *(chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET)) * VOFA_RAD_TO_DEG :
+                    *(chassis->chassis_INS_angle + INS_ROLL_ADDRESS_OFFSET)) * VOFA_RAD_TO_DEG :
                 0.0f,
         },
         .tail = VOFA_TAIL,

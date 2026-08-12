@@ -109,9 +109,10 @@ static uint8_t control_is_pure_turn(const Chassis_Control_Manager_t *manager,
 static float control_pitch_feedforward(const Chassis_Control_Manager_t *manager,
                                        float raw_pitch_rad)
 {
-    const float corrected_pitch_rad = Chassis_Hold_CorrectPitch(&manager->config.hold,
-                                                                 raw_pitch_rad);
-    return manager->config.hold.pitch_feedforward_a * sinf(corrected_pitch_rad);
+    // DRIVE模式也使用与BRAKE、HOLD相同的Pitch前馈死区
+    return Chassis_Hold_ComputePitchFeedforward(&manager->config.hold,
+                                                raw_pitch_rad,
+                                                NULL);
 }
 
 static float control_robust_abs_speed(const Chassis_Control_Input_t *input)
@@ -243,8 +244,10 @@ void Chassis_ControlManager_DefaultConfig(Chassis_Control_Config_t *config)
         .hold = {
             .position_kp_a_per_deg = 0.010f,
             .speed_kd_a_per_rpm = 0.010f,
-            .pitch_feedforward_a = -8.0f,
+            .pitch_feedforward_a = 8.0f,
             .pitch_zero_offset_rad = -1.45f / 57.29577951308232f,
+            .pitch_feedforward_off_pitch_rad = 3.0f / 57.29577951308232f,
+            .pitch_feedforward_full_pitch_rad = 5.0f / 57.29577951308232f,
             .current_limit_a = 6.5f,
         },
         .brake_position_comp_off_pitch_rad = 3.0f / 57.29577951308232f,

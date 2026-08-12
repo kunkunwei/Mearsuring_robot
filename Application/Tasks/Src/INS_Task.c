@@ -157,10 +157,10 @@ void INS_Task(void const *argument)
         /* 将传感器系欧拉角转换为车体系欧拉角。
          * IMU 板相对车体绕 Z 轴逆时针旋转 90°（x_imu→车体左，y_imu→车体后）：
          *   传感器系 EulerAngle 约定固定为 [0]=yaw, [1]=pitch, [2]=roll（EKF 输出）。
-         *   车体 pitch = +EulerAngle[2]（传感器 roll）
-         *   车体 roll  = -EulerAngle[1]（传感器 pitch）
+         *   当前代码Pitch字段 = +EulerAngle[2]，实车验证对应车体Roll
+         *   当前代码Roll字段  = -EulerAngle[1]，实车验证对应车体Pitch
          *   车体 yaw   = EulerAngle[0] + 90° 常数偏移（增量不受影响，绝对零位待上电标定）
-         * 车头抬起（上坡）时车体 pitch 为负，与底盘斜坡前馈的符号约定一致。 */
+         * 底盘控制暂时从代码Roll字段读取真实Pitch，车头抬起时真实Pitch为正。 */
         INS_Info.angle[0] = Quaternion_Info.EulerAngle[0];
         INS_Info.angle[1] = Quaternion_Info.EulerAngle[2];
         INS_Info.angle[2] = -Quaternion_Info.EulerAngle[1];
