@@ -116,6 +116,8 @@
 #define CHASSIS_MIT_BREAKAWAY_ENTER_RPM 30.0f
 #define CHASSIS_MIT_BREAKAWAY_EXIT_RPM 80.0f
 #define CHASSIS_MIT_RUNNING_FF_RATIO 0.30f
+#define CHASSIS_STOP_BRAKE_DONE_RPM 5.0f
+#define CHASSIS_STOP_BRAKE_MAX_CURRENT 10000.0f
 #define CHASSIS_TURN_MIN_RPM 120.0f
 #define CHASSIS_TURN_MIN_VX_THRESHOLD 0.03f
 #define CHASSIS_TURN_MIN_WZ_THRESHOLD 0.10f
@@ -161,16 +163,13 @@ typedef struct
 	float pos_deg;       // signed continuous wheel feedback position, degree
 	float pos_set_deg;   // signed continuous wheel target position, degree
 	float last_pos_raw_deg;
-	float last_speed_rpm;
-	float brake_current_cmd;
-	float brake_speed_ref_rpm;
-	float hold_pos_ref_deg;
+		float hold_pos_ref_deg;
 	float hold_pos_error_deg;
-	uint32_t last_status4_tick;
+uint32_t last_status4_tick;
 	uint8_t ff_breakaway_active;
 	int8_t ff_last_sign;
-	uint8_t hold_pos_ready;
-	uint8_t pos_ready;
+		uint8_t hold_pos_ready;
+uint8_t pos_ready;
 	int16_t target_current;
 } Chassis_Motor_t;
 typedef struct

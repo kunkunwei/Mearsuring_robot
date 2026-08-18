@@ -21,12 +21,6 @@ typedef struct
     float vx;       // Forward speed used by odom, m/s.
     float wz;       // Yaw rate used by odom, rad/s.
     float slip;     // Encoder yaw rate minus IMU yaw rate, rad/s.
-    float front_distance;
-    float rear_distance;
-    float left_distance;
-    float right_distance;
-    float wheel_weight[4];
-    uint8_t motion_mode;
     uint8_t valid;  // 1 when slip is small enough for odom to be trusted.
 } Chassis_Odom_t;
 

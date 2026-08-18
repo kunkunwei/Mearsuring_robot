@@ -13,7 +13,6 @@
 #include "ist8310.h"
 #include "sbus_remote.h"
 #include "Chassis_Task.h"
-#include "ultrasonic_i2c.h"
 
 #define VOFA_CHANNELS 12
 #define VOFA_TAIL {0x00, 0x00, 0x80, 0x7F}
@@ -29,15 +28,8 @@ void uart_printf(UART_HandleTypeDef *huart, const char *fmt, ...);
 HAL_StatusTypeDef Vofa_Send_chassis_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Observe_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Odom_Info(UART_HandleTypeDef *huart);
-HAL_StatusTypeDef Vofa_Send_Odom_Debug_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Motor_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
 HAL_StatusTypeDef Vofa_Send_Speed_Control_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
-HAL_StatusTypeDef Vofa_Send_Brake_Debug_Info(UART_HandleTypeDef *huart, const chassis_move_t *chassis);
-HAL_StatusTypeDef Vofa_Send_Ultrasonic_Info(UART_HandleTypeDef *huart,
-                                            const UltrasonicI2C_t *left,
-                                            const UltrasonicI2C_t *right,
-                                            uint8_t scan_count,
-                                            const uint8_t *scan_addr);
 bool Vofa_TryStorePidCommand(const uint8_t *data, uint16_t len);
 void Vofa_Process_RxCommand(void);
 

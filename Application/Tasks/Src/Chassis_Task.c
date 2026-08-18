@@ -9,7 +9,6 @@
 #include "mymotor.h"
 #include "usart.h"
 #include "vofa.h"
-#include "chassis_mit_ctrl.h"
 
 // ============================================================
 
@@ -24,7 +23,6 @@
             (output) = 0;                                \
         }                                                \
     }
-
 // 闄愬箙鍑芥暟
 fp32 fp32_constrain(fp32 Value, fp32 minValue, fp32 maxValue)
 {
@@ -67,6 +65,20 @@ static fp32 chassis_wrap_deg(fp32 angle)
     return angle;
 }
 
+static void chassis_mit_control_reset(Chassis_Motor_t *motor, PidTypeDef *mit_param)
+{
+    if (motor == NULL || mit_param == NULL)
+    {
+        return;
+    }
+
+    motor->pos_set_deg = motor->pos_deg;
+    motor->target_current = 0;
+    motor->ff_breakaway_active = 1U;
+    motor->ff_last_sign = 0;
+    old_PID_clear(mit_param);
+}
+
 static void chassis_mit_control_reset_all(chassis_move_t *chassis)
 {
     if (chassis == NULL)
@@ -78,10 +90,126 @@ static void chassis_mit_control_reset_all(chassis_move_t *chassis)
     {
         chassis->chassis_motor[i].speed_set = 0.0f;
         chassis->chassis_motor[i].speed_set_rpm = 0.0f;
-        Chassis_Mit_ResetMotor(&chassis->chassis_motor[i],
-                               &chassis->chassis_pid.motor_speed_pid[i]);
+        chassis_mit_control_reset(&chassis->chassis_motor[i],
+                                  &chassis->chassis_pid.motor_speed_pid[i]);
     }
     old_PID_clear(&chassis->chassis_pid.chassis_yaw_gyro_pid);
+}
+
+static fp32 chassis_mit_feedforward_current(Chassis_Motor_t *motor, const PidTypeDef *mit_param)
+{
+    if (motor == NULL || mit_param == NULL)
+    {
+        return 0.0f;
+    }
+
+    const int8_t target_sign = (int8_t)chassis_sign(motor->speed_set_rpm);
+    if (target_sign == 0)
+    {
+        motor->ff_breakaway_active = 1U;
+        motor->ff_last_sign = 0;
+        return 0.0f;
+    }
+
+    if (target_sign != motor->ff_last_sign)
+    {
+        motor->ff_breakaway_active = 1U;
+        motor->ff_last_sign = target_sign;
+    }
+
+    const fp32 abs_feedback_rpm = chassis_abs(motor->speed_rpm);
+    if (abs_feedback_rpm <= CHASSIS_MIT_BREAKAWAY_ENTER_RPM)
+    {
+        motor->ff_breakaway_active = 1U;
+    }
+    else if (abs_feedback_rpm >= CHASSIS_MIT_BREAKAWAY_EXIT_RPM)
+    {
+        motor->ff_breakaway_active = 0U;
+    }
+
+    const fp32 ff_current = (motor->ff_breakaway_active != 0U) ?
+                            mit_param->Kd :
+                            (mit_param->Kd * CHASSIS_MIT_RUNNING_FF_RATIO);
+    return ff_current * (fp32)target_sign;
+}
+
+static void chassis_mit_stop_brake_control(Chassis_Motor_t *motor, PidTypeDef *mit_param)
+{
+    if (motor == NULL || mit_param == NULL)
+    {
+        return;
+    }
+
+    if (chassis_abs(motor->speed_rpm) <= CHASSIS_STOP_BRAKE_DONE_RPM)
+    {
+        chassis_mit_control_reset(motor, mit_param);
+        return;
+    }
+
+    motor->pos_set_deg = motor->pos_deg;
+    motor->ff_breakaway_active = 1U;
+    motor->ff_last_sign = 0;
+
+    const fp32 speed_error_rpm = -motor->speed_rpm;
+
+    mit_param->set = 0.0f;
+    mit_param->fdb = motor->speed_rpm;
+    mit_param->error[0] = speed_error_rpm;
+    mit_param->Pout = 0.0f;
+    mit_param->Dout = mit_param->Ki * speed_error_rpm;
+    mit_param->Iout = 0.0f;
+    mit_param->out = fp32_constrain(mit_param->Dout,
+                                    -CHASSIS_STOP_BRAKE_MAX_CURRENT,
+                                    CHASSIS_STOP_BRAKE_MAX_CURRENT);
+    motor->target_current = (int16_t)mit_param->out;
+}
+
+static void chassis_mit_current_control(Chassis_Motor_t *motor, PidTypeDef *mit_param)
+{
+    if (motor == NULL || mit_param == NULL)
+    {
+        return;
+    }
+
+    if (!vesc_motor_status_is_online(motor->chassis_motor_measure, CHASSIS_MOTOR_STATUS1_TIMEOUT_MS))
+    {
+        chassis_mit_control_reset(motor, mit_param);
+        return;
+    }
+
+    if (chassis_abs(motor->speed_set_rpm) <= CHASSIS_MIT_ACTIVE_RPM_THRESHOLD)
+    {
+        chassis_mit_stop_brake_control(motor, mit_param);
+        return;
+    }
+
+    motor->pos_set_deg += motor->speed_set_rpm * 6.0f * CHASSIS_CONTROL_TIME;
+
+    fp32 pos_error_deg = motor->pos_set_deg - motor->pos_deg;
+    if (!vesc_motor_status4_is_online(motor->chassis_motor_measure, CHASSIS_MOTOR_STATUS4_TIMEOUT_MS))
+    {
+        pos_error_deg = 0.0f;
+        motor->pos_set_deg = motor->pos_deg;
+    }
+    else
+    {
+        pos_error_deg = fp32_constrain(pos_error_deg,
+                                       -CHASSIS_MIT_POS_ERROR_MAX_DEG,
+                                       CHASSIS_MIT_POS_ERROR_MAX_DEG);
+        motor->pos_set_deg = motor->pos_deg + pos_error_deg;
+    }
+    const fp32 speed_error_rpm = motor->speed_set_rpm - motor->speed_rpm;
+
+    mit_param->set = motor->speed_set_rpm;
+    mit_param->fdb = motor->speed_rpm;
+    mit_param->error[0] = speed_error_rpm;
+    mit_param->Pout = mit_param->Kp * pos_error_deg;
+    mit_param->Dout = mit_param->Ki * speed_error_rpm;
+    mit_param->Iout = chassis_mit_feedforward_current(motor, mit_param);
+
+    const fp32 current_set = mit_param->Pout + mit_param->Dout + mit_param->Iout;
+    mit_param->out = fp32_constrain(current_set, -M3505_MOTOR_SPEED_PID_MAX_OUT, M3505_MOTOR_SPEED_PID_MAX_OUT);
+    motor->target_current = (int16_t)mit_param->out;
 }
 
 static void chassis_hold_test_reset(chassis_move_t *chassis)
@@ -112,7 +240,7 @@ static void chassis_hold_position_control(Chassis_Motor_t *motor, PidTypeDef *ho
     if (!vesc_motor_status_is_online(motor->chassis_motor_measure, CHASSIS_MOTOR_STATUS1_TIMEOUT_MS) ||
         !vesc_motor_status4_is_online(motor->chassis_motor_measure, CHASSIS_MOTOR_STATUS4_TIMEOUT_MS))
     {
-        Chassis_Mit_ResetMotor(motor, hold_param);
+        chassis_mit_control_reset(motor, hold_param);
         motor->hold_pos_ready = 0U;
         motor->hold_pos_error_deg = 0.0f;
         return;
@@ -296,9 +424,6 @@ static void chassis_init(chassis_move_t *chassis_move_init)
     for (i = 0; i < 4; i++)
     {   // 鑾峰彇搴曠洏椹卞姩杞數鏈烘寚閽?        chassis_move_init->chassis_motor[i].chassis_motor_measure = get_chassis_motor(i);
         chassis_move_init->chassis_motor[i].chassis_motor_measure = get_chassis_motor(i);
-        chassis_move_init->chassis_motor[i].last_speed_rpm = 0.0f;
-        chassis_move_init->chassis_motor[i].brake_current_cmd = 0.0f;
-        chassis_move_init->chassis_motor[i].brake_speed_ref_rpm = 0.0f;
         old_PID_Init(&chassis_move_init->chassis_pid.motor_speed_pid[i], PID_POSITION, motor_speed_pid, M3505_MOTOR_SPEED_PID_MAX_OUT, M3505_MOTOR_SPEED_PID_MAX_IOUT);
     }
     // 鍒濆鍖栨棆杞琍ID
@@ -334,8 +459,6 @@ static void chassis_feedback_update(chassis_move_t *chassis_move_update)
     for (i = 0; i < 4; i++)
     {
         //鏇存柊鐢垫満閫熷害锛堝皢RPM杞崲涓簃/s锛?        // M3508鐢垫満锛歊PM杞崲涓簉ad/s鐨勭郴鏁版槸 2蟺/60 = 0.10471975512
-        chassis_move_update->chassis_motor[i].last_speed_rpm =
-            chassis_move_update->chassis_motor[i].speed_rpm;
         chassis_move_update->chassis_motor[i].speed_rpm = chassis_move_update->chassis_motor[i].chassis_motor_measure->rpm *
                                                           motor_forward_sign[i];
         chassis_move_update->chassis_motor[i].speed = chassis_move_update->chassis_motor[i].speed_rpm *
@@ -390,11 +513,7 @@ void chassis_set_mode(chassis_move_t *chassis_move_mode)
         chassis_odom_reset();
     }
 
-    if (switch_is_up(chassis_move_mode->chassis_RC->rc.s[FUNCTION_CHANNEL]))
-    {
-        chassis_move_mode->mode.chassis_mode = CHASSIS_HOLD_TEST;
-    }
-    else if (switch_is_down(chassis_move_mode->chassis_RC->rc.s[MODE_CHANNEL]))
+    if (switch_is_down(chassis_move_mode->chassis_RC->rc.s[MODE_CHANNEL]))
     {
         chassis_move_mode->mode.chassis_mode = CHASSIS_FORCE_RAW;
     }
@@ -404,7 +523,7 @@ void chassis_set_mode(chassis_move_t *chassis_move_mode)
     }
     else if (switch_is_up(chassis_move_mode->chassis_RC->rc.s[MODE_CHANNEL]))
     {
-        chassis_move_mode->mode.chassis_mode = CHASSIS_ROS_CTRL;
+        chassis_move_mode->mode.chassis_mode = CHASSIS_HOLD_TEST;
     }
     else
     {
@@ -570,7 +689,6 @@ void chassis_set_contorl(chassis_move_t *chassis_move_control)
     const fp32 target_wz = fp32_constrain(w_set_clean, -NORMAL_MAX_CHASSIS_SPEED_WZ, NORMAL_MAX_CHASSIS_SPEED_WZ);
 
     chassis_move_control->state_set.vx = target_vx;
-    // chassis_move_control->state_set.wz = 0;
     chassis_move_control->state_set.wz = target_wz;
 
 
@@ -628,21 +746,10 @@ void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
     }
     chassis_apply_turn_min_rpm(chassis_move_control_loop);
 
-    fp32 brake_ref_abs_speed_rpm = 0.0f;
     for (i = 0; i < 4; i++)
     {
-        const fp32 abs_speed_rpm = chassis_abs(chassis_move_control_loop->chassis_motor[i].speed_rpm);
-        if (abs_speed_rpm > brake_ref_abs_speed_rpm)
-        {
-            brake_ref_abs_speed_rpm = abs_speed_rpm;
-        }
-    }
-
-    for (i = 0; i < 4; i++)
-    {
-        Chassis_Mit_CurrentControl(&chassis_move_control_loop->chassis_motor[i],
-                                   &chassis_move_control_loop->chassis_pid.motor_speed_pid[i],
-                                   brake_ref_abs_speed_rpm);
+        chassis_mit_current_control(&chassis_move_control_loop->chassis_motor[i],
+                                    &chassis_move_control_loop->chassis_pid.motor_speed_pid[i]);
     }
 
 }

@@ -1,16 +1,24 @@
 #include "observe_task.h"
 #include "Chassis_Task.h"
 #include "mymotor.h"
-#include "odometry.h"
 #include <math.h>
 #include <string.h>
 
 #define OBSERVE_TASK_PERIOD_MS 5
 #define OBSERVE_TASK_PERIOD_S  (OBSERVE_TASK_PERIOD_MS / 1000.0f)
+#define ODOM_SLIP_WZ_VALID_THRESHOLD 0.35f
 #define ODOM_YAW_PI 3.14159265358979323846f
+#define ODOM_VX_DEADBAND 0.003f
+#define ODOM_WZ_DEADBAND 0.010f
 #define ODOM_STILL_VX_THRESHOLD 0.006f
 #define ODOM_STILL_WZ_THRESHOLD 0.020f
 #define ODOM_STILL_ACCEL_THRESHOLD 0.120f
+#define ODOM_STILL_DS_THRESHOLD (ODOM_STILL_VX_THRESHOLD * OBSERVE_TASK_PERIOD_S)
+#define ODOM_ENCODER_RANGE 8192
+#define ODOM_WHEEL_CIRCUMFERENCE (2.0f * ODOM_YAW_PI * WHEEL_R)
+#define ODOM_ENCODER_TO_METER (ODOM_WHEEL_CIRCUMFERENCE / (float)ODOM_ENCODER_RANGE)
+#define ODOM_VESC_TACHOMETER_SCALE 6.0f
+#define ODOM_VESC_TACHOMETER_TO_METER (ODOM_WHEEL_CIRCUMFERENCE / (ODOM_VESC_TACHOMETER_SCALE * VESC_M3508_POLE_PAIRS))
 
 static KalmanFilter_Info_TypeDef vaEstimateKF;
 static uint8_t vaEstimateKF_ready = 0U;
@@ -47,15 +55,26 @@ static fp32 diff_v;
 static fp32 imu_bias_estimate = -0.4f;
 static Chassis_Odom_t chassis_odom;
 static const chassis_move_t *local_chassis_move;
-static OdomEstimator_t odom_estimator;
+static uint16_t odom_last_ecd[4];
+static int32_t odom_last_tachometer[4];
+static uint8_t odom_encoder_ready = 0U;
 
 static void CalculateWheelLinearSpeed(const chassis_move_t *chassis, float *left_speed, float *right_speed);
+static float CalculateEncoderDeltaDistance(const chassis_move_t *chassis);
 static void UpdateIMUBias(fp32 raw_imu_accel, float aver_v);
-static void BuildOdomInput(const chassis_move_t *chassis, OdomInput_t *input);
-static void UpdateOdometry(const OdomOutput_t *output);
+static void UpdateOdometry(const chassis_move_t *chassis, float vlb, float vrb, float ds);
 static uint8_t IsChassisStill(float vx, float wz, float accel);
 static void ZeroVelocityEstimate(void);
 static float WrapPi(float angle);
+static int16_t EncoderDelta(uint16_t now, uint16_t last);
+static float RobustWheelDistance(float wheel_ds[4]);
+
+static const float odom_wheel_direction[4] = {
+    CHASSIS_MOTOR_1_FORWARD_SIGN,
+    CHASSIS_MOTOR_2_FORWARD_SIGN,
+    CHASSIS_MOTOR_3_FORWARD_SIGN,
+    CHASSIS_MOTOR_4_FORWARD_SIGN,
+};
 
 void ObserveTask(void const *argument)
 {
@@ -68,15 +87,12 @@ void ObserveTask(void const *argument)
 
     local_chassis_move = get_chassis_control_point();
     xvEstimateKF_Init(&vaEstimateKF);
-    OdomEstimator_Init(&odom_estimator, NULL);
 
     float vrb = 0.0f;
     float vlb = 0.0f;
     fp32 raw_imu_accel = 0.0f;
     fp32 raw_imu_gyro_z = 0.0f;
     fp32 compensated_accel = 0.0f;
-    OdomInput_t odom_input;
-    OdomOutput_t odom_output;
     TickType_t systick = 0;
 
     for (;;)
@@ -86,9 +102,19 @@ void ObserveTask(void const *argument)
         CalculateWheelLinearSpeed(local_chassis_move, &vlb, &vrb);
 
         aver_v = (vrb + vlb) / 2.0f;
+        float encoder_ds = CalculateEncoderDeltaDistance(local_chassis_move);
         raw_imu_gyro_z = *(local_chassis_move->chassis_imu_gyro + INS_GYRO_Z_ADDRESS_OFFSET);
         const fp32 wheel_wz = (vrb - vlb) / (2.0f * MOTOR_DISTANCE_TO_CENTER);
         diff_v = wheel_wz - raw_imu_gyro_z;
+
+        if (fabsf(diff_v) > ODOM_SLIP_WZ_VALID_THRESHOLD)
+        {
+            vaEstimateKF.Data.R[0] = 5000.0f;
+        }
+        else
+        {
+            vaEstimateKF.Data.R[0] = 250.0f;
+        }
 
         raw_imu_accel = *(local_chassis_move->chassis_imu_accel + INS_ACCEL_X_ADDRESS_OFFSET);
         UpdateIMUBias(raw_imu_accel, aver_v);
@@ -97,17 +123,18 @@ void ObserveTask(void const *argument)
         xvEstimateKF_Update(&vaEstimateKF, compensated_accel, aver_v);
 
         uint8_t chassis_still = IsChassisStill(aver_v, raw_imu_gyro_z, compensated_accel) &&
-                                fabsf(local_chassis_move->state_set.vx) < ODOM_STILL_VX_THRESHOLD &&
-                                fabsf(local_chassis_move->state_set.wz) < ODOM_STILL_WZ_THRESHOLD;
+                                (fabsf(encoder_ds) < ODOM_STILL_DS_THRESHOLD);
         if (chassis_still)
         {
             ZeroVelocityEstimate();
         }
 
         v_real = vel_acc[0];
-        BuildOdomInput(local_chassis_move, &odom_input);
-        OdomEstimator_Update(&odom_estimator, &odom_input, &odom_output);
-        UpdateOdometry(&odom_output);
+        if (chassis_still)
+        {
+            encoder_ds = 0.0f;
+        }
+        UpdateOdometry(local_chassis_move, vlb, vrb, encoder_ds);
 
         osDelayUntil(&systick, OBSERVE_TASK_PERIOD_MS);
     }
@@ -142,6 +169,46 @@ static void CalculateWheelLinearSpeed(const chassis_move_t *chassis, float *left
     *right_speed = (chassis->chassis_motor[1].speed + chassis->chassis_motor[2].speed) * 0.5f;
 }
 
+static float CalculateEncoderDeltaDistance(const chassis_move_t *chassis)
+{
+    if (chassis == NULL)
+    {
+        return 0.0f;
+    }
+
+    if (odom_encoder_ready == 0U)
+    {
+        for (uint8_t i = 0; i < 4U; i++)
+        {
+#if CHASSIS_ESC_PROTOCOL == CHASSIS_ESC_PROTOCOL_VESC
+            odom_last_tachometer[i] = chassis->chassis_motor[i].chassis_motor_measure->tachometer;
+#else
+            odom_last_ecd[i] = chassis->chassis_motor[i].chassis_motor_measure->ecd;
+#endif
+        }
+        odom_encoder_ready = 1U;
+        return 0.0f;
+    }
+
+    float wheel_ds[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint8_t i = 0; i < 4U; i++)
+    {
+#if CHASSIS_ESC_PROTOCOL == CHASSIS_ESC_PROTOCOL_VESC
+        const int32_t now_tachometer = chassis->chassis_motor[i].chassis_motor_measure->tachometer;
+        const int32_t delta_tachometer = now_tachometer - odom_last_tachometer[i];
+        odom_last_tachometer[i] = now_tachometer;
+        wheel_ds[i] = (float)delta_tachometer * ODOM_VESC_TACHOMETER_TO_METER * odom_wheel_direction[i];
+#else
+        const uint16_t now_ecd = chassis->chassis_motor[i].chassis_motor_measure->ecd;
+        const int16_t delta_ecd = EncoderDelta(now_ecd, odom_last_ecd[i]);
+        odom_last_ecd[i] = now_ecd;
+        wheel_ds[i] = (float)delta_ecd * ODOM_ENCODER_TO_METER * odom_wheel_direction[i];
+#endif
+    }
+
+    return RobustWheelDistance(wheel_ds);
+}
+
 static void UpdateIMUBias(fp32 raw_imu_accel, float aver_v_current)
 {
     if (fabsf(aver_v_current) < 0.01f && fabsf(raw_imu_accel + imu_bias_estimate) < 0.5f)
@@ -150,74 +217,31 @@ static void UpdateIMUBias(fp32 raw_imu_accel, float aver_v_current)
     }
 }
 
-static void BuildOdomInput(const chassis_move_t *chassis, OdomInput_t *input)
+static void UpdateOdometry(const chassis_move_t *chassis, float vlb, float vrb, float ds)
 {
-    if (chassis == NULL || input == NULL)
+    if (chassis == NULL || chassis->chassis_imu_gyro == NULL)
     {
         return;
     }
 
-    memset(input, 0, sizeof(*input));
-    input->dt_s = OBSERVE_TASK_PERIOD_S;
-    input->command_vx_mps = chassis->state_set.vx;
-    input->command_wz_rad_s = chassis->state_set.wz;
+    const float wz_imu = *(chassis->chassis_imu_gyro + INS_GYRO_Z_ADDRESS_OFFSET);
+    const float wheel_wz = (vrb - vlb) / (2.0f * MOTOR_DISTANCE_TO_CENTER);
+    const float raw_vx = ds / OBSERVE_TASK_PERIOD_S;
+    const float odom_vx = (fabsf(raw_vx) < ODOM_VX_DEADBAND) ? 0.0f : raw_vx;
+    const float odom_wz = (fabsf(wz_imu) < ODOM_WZ_DEADBAND) ? 0.0f : wz_imu;
+    const float odom_ds = (fabsf(raw_vx) < ODOM_VX_DEADBAND) ? 0.0f : ds;
 
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        input->wheel[i].pos_deg = chassis->chassis_motor[i].pos_deg;
-        input->wheel[i].speed_mps = chassis->chassis_motor[i].speed;
-        input->wheel[i].speed_rpm = chassis->chassis_motor[i].speed_rpm;
-        input->wheel[i].pos_ready = chassis->chassis_motor[i].pos_ready;
-        input->wheel[i].online =
-            vesc_motor_status4_is_online(chassis->chassis_motor[i].chassis_motor_measure,
-                                         CHASSIS_MOTOR_STATUS4_TIMEOUT_MS);
-    }
+    diff_v = wheel_wz - wz_imu;
 
-    if (chassis->chassis_INS_angle != NULL)
-    {
-        input->imu.yaw_rad = *(chassis->chassis_INS_angle + INS_YAW_ADDRESS_OFFSET);
-        input->imu.pitch_rad = *(chassis->chassis_INS_angle + INS_PITCH_ADDRESS_OFFSET);
-        input->imu.yaw_ready = 1U;
-    }
+    chassis_odom.wz = odom_wz;
+    chassis_odom.vx = odom_vx;
+    chassis_odom.slip = diff_v;
+    chassis_odom.valid = (fabsf(diff_v) < ODOM_SLIP_WZ_VALID_THRESHOLD) ? 1U : 0U;
 
-    if (chassis->chassis_imu_gyro != NULL)
-    {
-        input->imu.gyro_z_rad_s = *(chassis->chassis_imu_gyro + INS_GYRO_Z_ADDRESS_OFFSET);
-    }
-}
-
-static void UpdateOdometry(const OdomOutput_t *output)
-{
-    if (output == NULL)
-    {
-        return;
-    }
-
-    if (output->valid == 0U)
-    {
-        chassis_odom.valid = 0U;
-        return;
-    }
-
-    diff_v = output->slip_wz_rad_s;
-    chassis_odom.wz = output->wz_rad_s;
-    chassis_odom.vx = output->vx_mps;
-    chassis_odom.slip = output->slip_wz_rad_s;
-    chassis_odom.front_distance = output->front_distance_m;
-    chassis_odom.rear_distance = output->rear_distance_m;
-    chassis_odom.left_distance = output->left_distance_m;
-    chassis_odom.right_distance = output->right_distance_m;
-    for (uint8_t i = 0U; i < 4U; i++)
-    {
-        chassis_odom.wheel_weight[i] = output->wheel_weight[i];
-    }
-    chassis_odom.motion_mode = (uint8_t)output->motion_mode;
-    chassis_odom.valid = output->valid;
-
-    chassis_odom.yaw = WrapPi(chassis_odom.yaw + output->dtheta_rad);
-    chassis_odom.x += output->ds_m * cosf(chassis_odom.yaw);
-    chassis_odom.y += output->ds_m * sinf(chassis_odom.yaw);
-    chassis_odom.distance += output->ds_m;
+    chassis_odom.yaw = WrapPi(chassis_odom.yaw + odom_wz * OBSERVE_TASK_PERIOD_S);
+    chassis_odom.x += odom_ds * cosf(chassis_odom.yaw);
+    chassis_odom.y += odom_ds * sinf(chassis_odom.yaw);
+    chassis_odom.distance += odom_ds;
 }
 
 static uint8_t IsChassisStill(float vx, float wz, float accel)
@@ -266,6 +290,45 @@ static float WrapPi(float angle)
     return angle;
 }
 
+static int16_t EncoderDelta(uint16_t now, uint16_t last)
+{
+    int16_t delta = (int16_t)(now - last);
+    if (delta > (ODOM_ENCODER_RANGE / 2))
+    {
+        delta -= ODOM_ENCODER_RANGE;
+    }
+    else if (delta < -(ODOM_ENCODER_RANGE / 2))
+    {
+        delta += ODOM_ENCODER_RANGE;
+    }
+    return delta;
+}
+
+static float RobustWheelDistance(float wheel_ds[4])
+{
+    float sorted[4] = {
+        wheel_ds[0],
+        wheel_ds[1],
+        wheel_ds[2],
+        wheel_ds[3],
+    };
+
+    for (uint8_t i = 0U; i < 3U; i++)
+    {
+        for (uint8_t j = (uint8_t)(i + 1U); j < 4U; j++)
+        {
+            if (sorted[j] < sorted[i])
+            {
+                const float tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
+    }
+
+    return (sorted[1] + sorted[2]) / 2.0f;
+}
+
 void xvEstimateKF_Update(KalmanFilter_Info_TypeDef *EstimateKF, float acc, float vel)
 {
     if (EstimateKF == NULL)
@@ -302,6 +365,6 @@ const Chassis_Odom_t *get_chassis_odom_point(void)
 void chassis_odom_reset(void)
 {
     memset(&chassis_odom, 0, sizeof(chassis_odom));
-    OdomEstimator_Reset(&odom_estimator);
+    odom_encoder_ready = 0U;
     ZeroVelocityEstimate();
 }

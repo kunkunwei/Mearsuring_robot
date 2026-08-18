@@ -1,83 +1,80 @@
-# Mearsuring Robot
+# new_hero
 
-管道复尺测绘机器人底盘控制工程。项目基于 RoboMaster C 型开发板 STM32F407 和 FreeRTOS，实现四轮独立驱动差速底盘控制、N630/VESC 电调 CAN 通信、编码器/IMU 里程计估计、USB 上位机通信和调试数据输出。
+这是我重新搓的老麦轮英雄机器人代码，面向 STM32F407 + FreeRTOS，包含云台、底盘与自瞄接口。
 
-## 项目目标
+## 1. 输入控制方式切换与硬件支持
 
-机器人用于狭窄、平整、可能无光照的方形管道内距离测量。底盘需要稳定沿管道中心行驶，并满足 1 m 行驶距离误差不超过 1 cm 的里程计精度目标。后续树莓派上位机会结合雷达数据进行中心循迹和路径规划。
+### 控制源与编译开关
+- 云台控制源由 `Application/Tasks/Inc/Gimbal_task.h` 中的宏控制。
+  - `USE_PC_CONTROL`：图传链路遥控器（VT03）控制（当前已启用）。
+  - `USE_PC_RM_CONTROL`：图传链路电脑选手端控制（当前已启用）。
+  - `USE_RC_CONTROL`：传统遥控器控制（注释即禁用）。
+- 若使用 SBUS 协议遥控器，启用 `USE_SBUS_PROTOCOL` 并按对应通道定义。
 
-## 硬件与通信
+### 硬件与通道约定（核心）
+- VT03 图传遥控器：
+  - `rc.mode_sw`：模式档位（0/1/2）。
+  - `rc.pause`：暂停/无力切换键。
+  - `rc.fn_1`：小陀螺模式切换。
+- 传统遥控器（DT7 或 SBUS）：
+  - `RC_RIGHT_X_CH`、`RC_RIGHT_Y_CH`：云台 YAW/PITCH 通道。
+  - `LEFT_SWITCH`/`RIGHT_SWITCH`（或 SBUS 四档开关）：模式切换。
 
-- 主控：RoboMaster C 板，STM32F407。
-- 实时系统：FreeRTOS。
-- 底盘：四轮独立驱动，差速转向。
-- 电机：M3508 直驱轮，减速箱已拆除。
-- 电调：N630/VESC，使用 CAN1 通信。
-- 上位机：树莓派，当前通过 USB CDC 通信，后续可切换 USART6。
-- 调试：USART6 当前用于 VOFA+ 调试输出。
-- IMU：用于 yaw 和角速度辅助里程计与状态判断。
+### 底盘输入
+- 底盘同时支持 VT03 与传统遥控器输入，统一由 `Application/Tasks/Src/Chassis_Task.c` 的 `chassis_set_mode()` 解析并切换状态。
 
-## 控制模式
+## 2. 云台与底盘的关联控制
 
-遥控器状态机如下：
+- 底盘可选择“跟随云台”或“云台跟随底盘”的耦合方式：
+  - `CHASSIS_CHASSIS_FOLLOW_GIMBAL_YAW`：底盘朝向跟随云台 YAW。
+  - `CHASSIS_GIMBAL_FOLLOW_CHASSIS`：云台保持与底盘对齐。
+  - `CHASSIS_VECTOR_NO_FOLLOW_YAW`：底盘向量控制，方向不跟随云台。
+- 云台端通过 `local_chassis_ref = get_chassis_ref_point()` 获取底盘状态，用于耦合控制与模式切换处理。
 
-- 右拨杆下拨：无力模式，底盘不输出力矩。
-- 右拨杆中位：遥控手动模式，遥控器摇杆控制前进、后退和转向。
-- 右拨杆上拨：ROS 控制模式，底盘接收树莓派通过 USB 发送的 `vx`、`wz` 指令。
-- 左拨杆上拨：原地固定模式，优先级最高，用于锁定当前位置。
+## 3. 云台与底盘状态机
 
-上位机控制量单位：
+### 云台状态机（`gimbal_mod_e`）
+- `GIMBAL_MOD_NO_FORCE`：无力模式。
+- `GIMBAL_MOD_SLOW_CALI`：慢速校准。
+- `GIMBAL_MOD_NORMAL`：正常模式（底盘跟随云台）。
+- `GIMBAL_MOD_AutoAim`：自动瞄准模式。
+- `GIMBAL_MOD_FLOW_CHASSIS`：云台跟随底盘。
 
-- `vx`：m/s，车体前进方向为正。
-- `wz`：rad/s，逆时针旋转为正。
+状态切换逻辑：
+- 由 VT03 `pause` + `mode_sw` 组合控制，细节见 `Application/Tasks/Src/Gimbal_task.c` 的 `gimbal_set_mod()`。
+- 进入/退出自瞄与小陀螺模式时，会在 `gimbal_mod_change_date_transfer()` 中重置目标位置，避免突跳。
 
-## MiniPC 通信协议
+### 底盘状态机（`chassis_mode_e`）
+- `CHASSIS_FORCE_RAW`：开环/无力。
+- `CHASSIS_CHASSIS_FOLLOW_GIMBAL_YAW`：底盘跟随云台。
+- `CHASSIS_GIMBAL_FOLLOW_CHASSIS`：云台跟随底盘。
+- `CHASSIS_VECTOR_NO_FOLLOW_YAW`：向量控制但不跟随云台。
 
-上位机到底盘控制帧长度为 12 字节：
+状态切换逻辑：
+- 由 VT03 `pause` 与 `mode_sw` 组合控制，见 `Application/Tasks/Src/Chassis_Task.c` 的 `chassis_set_mode()`。
 
-| 字节 | 内容 |
-| --- | --- |
-| 0 | 帧头 `0x42` |
-| 1 | 地址 `0x31` |
-| 2 | 帧长 `12` |
-| 3-6 | `float vx`，小端 |
-| 7-10 | `float wz`，小端 |
-| 11 | checksum，前 11 字节累加 |
+## 4. 自瞄接口
 
-底盘到上位机里程计帧长度为 36 字节，包含 `x`、`y`、`yaw`、`distance`、`vx`、`wz` 和四个电机编码器值。
+- USB 小电脑数据入口：`getUsbMiniPcPtr()`，结构体类型为 `Usb_AutoAim_t`（见 `Application/Tasks/Src/Gimbal_task.c`）。
+- 自瞄控制主逻辑：`minipc_control()`，直接使用 `minipc_target_yaw` 与 `minipc_target_pitch` 更新云台目标。
+- ROS/上位机反馈：`Application/Tasks/Src/Ros_Task.c` 中 `MiniPC_Sendgimbal()` 周期发送云台姿态。
+- 轨迹相关数据结构：`Application/API/Inc/api_trajectory.h`。
 
-## 主要模块
+## 5. 重新生成项目的注意事项
 
-- `Application/Tasks/Src/Chassis_Task.c`：底盘任务、模式切换、运动学分解和控制器调用。
-- `Application/Tasks/Src/observe_task.c`：里程计与状态估计任务。
-- `Application/Tasks/Src/Ros_Task.c`：USB/上位机里程计回传。
-- `Components/Controller/Src/chassis_mit_ctrl.c`：MIT 风格电流控制。
-- `Components/Controller/Src/chassis_brake.c`：停车制动、制动限幅和简化 ABS 防抱死逻辑。
-- `Components/Algorithm/Src/odometry.c`：四轮编码器、IMU yaw 和运动指令融合的里程计估计。
-- `Components/Device/Src/mymotor.c`：电机反馈数据结构与 VESC 状态解析。
-- `Components/Device/Src/minipc.c`：上位机控制帧解析与里程计帧打包。
-- `Bsp/Src/bsp_can.c`：CAN 底层收发。
-- `Bsp/Src/vofa.c`：VOFA+ 调试数据发送和 PID 调参命令解析。
+1. 先在本地构建项目（确保当前工程可正常编译）。
+2. 再使用 STM32CubeMX 重新生成工程。
+3. CubeMX 生成后，恢复 `CMakeLists.txt` 为我维护的版本：
+   - 方式 A：将 `CMakeLists_template.txt` 的内容回拷到 `CMakeLists.txt`。
+   - 方式 B：若使用版本管理工具，直接回滚 `CMakeLists.txt` 到我写好的版本。
 
-## VESC/CAN 配置建议
+---
 
-- CAN 波特率：500 kbit/s。
-- Status Rate 1：500 Hz，只勾选 Status 1，用于 RPM、电流、占空比。
-- Status Rate 2：建议 100-250 Hz，只勾选 Status 4，用于 PID-position Now。
-- Status 5 当前不作为主里程计输入。
+### 关键文件索引
+- 云台任务：`Application/Tasks/Src/Gimbal_task.c`
+- 底盘任务：`Application/Tasks/Src/Chassis_Task.c`
+- 云台头文件：`Application/Tasks/Inc/Gimbal_task.h`
+- 底盘头文件：`Application/Tasks/Inc/Chassis_Task.h`
+- 自瞄接口：`Application/API/Inc/api_trajectory.h`
+- CMake 配置：`CMakeLists.txt` / `CMakeLists_template.txt`
 
-## 构建说明
-
-工程使用 CLion + STM32CubeCLT/CMake 构建，核心工程文件包括：
-
-- `CMakeLists.txt`
-- `CMakeLists_template.txt`
-- `Mearsuring_robot.ioc`
-- `STM32F407IGHX_FLASH.ld`
-- `STM32F407IGHX_RAM.ld`
-
-如果使用 STM32CubeMX 重新生成工程，需要检查 `Core/Src/can.c` 中 CAN1 是否仍为 500 kbit/s，并确认 `CMakeLists.txt` 没有被覆盖为错误配置。
-
-## 备注
-
-仓库不提交本地构建产物、VOFA/CAN 测试 CSV、PPT 输出和 IDE 缓存文件。调试数据请保留在本地，不进入版本库。
